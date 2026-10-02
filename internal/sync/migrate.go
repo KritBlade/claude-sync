@@ -31,7 +31,13 @@ func (s *Syncer) MigratePaths(ctx context.Context) (*MigrateResult, error) {
 		return nil, fmt.Errorf("failed to list remote objects: %w", err)
 	}
 
-	var legacyKeys []string
+	// A legacy remote key and the local path it is read from differ whenever the
+	// key was written with an uppercase drive letter.
+	type legacyKey struct {
+		remoteKey string
+		localPath string
+	}
+	var legacyKeys []legacyKey
 	for _, obj := range remoteObjects {
 		if !strings.HasSuffix(obj.Key, ".age") {
 			continue
@@ -49,26 +55,31 @@ func (s *Syncer) MigratePaths(ctx context.Context) (*MigrateResult, error) {
 			result.Foreign = append(result.Foreign, raw)
 			continue
 		}
-		if _, err := os.Stat(filepath.Join(s.claudeDir, raw)); err != nil {
+		// A legacy key carries whatever drive-letter case the folder had when it
+		// was written. Read and record the file under the canonical spelling, or
+		// the upload puts the old one straight back into the state this device
+		// just rewrote.
+		local := canonicalRelPath(raw)
+		if _, err := os.Stat(filepath.Join(s.claudeDir, local)); err != nil {
 			// We can't re-encrypt content we don't have locally
 			result.Foreign = append(result.Foreign, raw)
 			continue
 		}
-		legacyKeys = append(legacyKeys, raw)
+		legacyKeys = append(legacyKeys, legacyKey{remoteKey: raw, localPath: local})
 	}
 
 	total := len(legacyKeys)
-	for i, raw := range legacyKeys {
-		s.progress(ProgressEvent{Action: "upload", Path: raw, Current: i + 1, Total: total})
-		if err := s.uploadFile(ctx, raw); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("%s: %w", raw, err))
+	for i, key := range legacyKeys {
+		s.progress(ProgressEvent{Action: "upload", Path: key.localPath, Current: i + 1, Total: total})
+		if err := s.uploadFile(ctx, key.localPath); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("%s: %w", key.localPath, err))
 			continue
 		}
-		if err := s.storage.Delete(ctx, raw+".age"); err != nil {
-			result.Errors = append(result.Errors, fmt.Errorf("delete legacy %s: %w", raw, err))
+		if err := s.storage.Delete(ctx, key.remoteKey+".age"); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("delete legacy %s: %w", key.remoteKey, err))
 			continue
 		}
-		result.Migrated = append(result.Migrated, raw)
+		result.Migrated = append(result.Migrated, key.remoteKey)
 	}
 
 	if total > 0 {
