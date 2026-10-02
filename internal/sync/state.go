@@ -80,7 +80,85 @@ func loadStateFromPath(statePath string) (*SyncState, error) {
 		state.Files = make(map[string]*FileState)
 	}
 
+	if err := canonicalizeStateKeys(&state, statePath); err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: could not rewrite state keys to a canonical drive letter (%v); continuing with the keys as recorded\n", err)
+	}
+
 	return &state, nil
+}
+
+// canonicalizeStateKeys rewrites project keys recorded under an uppercase drive
+// letter to the canonical lowercase spelling, once, and saves the result. Keys
+// written by an earlier build no longer equal the names the disk walk produces,
+// and push compares the two by string: one file would read as both a new upload
+// and a deletion of the same remote object, which uploads it and then deletes
+// it. The file as it stood is kept beside the new one.
+func canonicalizeStateKeys(state *SyncState, statePath string) error {
+	needsRewrite := false
+	for key := range state.Files {
+		if canonicalRelPath(key) != key {
+			needsRewrite = true
+			break
+		}
+	}
+	if !needsRewrite {
+		return nil
+	}
+
+	// Keys already canonical are placed first, so a device holding both
+	// spellings of one file keeps the entry that matches what it walks today.
+	rewritten := make(map[string]*FileState, len(state.Files))
+	for key, entry := range state.Files {
+		if canonicalRelPath(key) == key {
+			rewritten[key] = entry
+		}
+	}
+	rewrittenCount, droppedCount := 0, 0
+	for key, entry := range state.Files {
+		canonical := canonicalRelPath(key)
+		if canonical == key {
+			continue
+		}
+		if _, taken := rewritten[canonical]; taken {
+			droppedCount++
+			fmt.Fprintf(os.Stderr, "Warning: state recorded both %s and %s; keeping the canonical entry\n", key, canonical)
+			continue
+		}
+		if entry != nil {
+			entry.Path = canonical
+		}
+		rewritten[canonical] = entry
+		rewrittenCount++
+	}
+
+	// Keep the state as it stood before the first rewrite. A later run must not
+	// replace that with an already-rewritten copy, or the original is lost.
+	backupPath := statePath + ".bak-drive-letter"
+	switch _, err := os.Stat(backupPath); {
+	case os.IsNotExist(err):
+		previous, readErr := os.ReadFile(statePath)
+		if readErr != nil {
+			return fmt.Errorf("reading %s to back it up: %w", statePath, readErr)
+		}
+		if writeErr := os.WriteFile(backupPath, previous, 0600); writeErr != nil {
+			return fmt.Errorf("writing %s: %w", backupPath, writeErr)
+		}
+	case err != nil:
+		return fmt.Errorf("checking %s: %w", backupPath, err)
+	}
+
+	state.Files = rewritten
+	state.savePath = statePath
+	if err := state.Save(); err != nil {
+		return fmt.Errorf("saving the rewritten state: %w", err)
+	}
+
+	fmt.Fprintf(os.Stderr, "Rewrote %d state key(s) to a lowercase drive letter", rewrittenCount)
+	if droppedCount > 0 {
+		fmt.Fprintf(os.Stderr, ", dropped %d duplicate(s)", droppedCount)
+	}
+	fmt.Fprintf(os.Stderr, "; the previous state is kept as %s\n", backupPath)
+	return nil
 }
 
 func NewState() *SyncState {
@@ -281,7 +359,10 @@ func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(strin
 					return nil
 				}
 
-				files[relPath] = fi
+				// Record the canonical spelling so a state key always equals
+				// what a later walk produces, whichever drive-letter case the
+				// folder carries on disk.
+				files[canonicalRelPath(relPath)] = fi
 				return nil
 			})
 			if err != nil {
@@ -296,7 +377,7 @@ func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(strin
 			if isExcluded != nil && isExcluded(syncPath) {
 				continue
 			}
-			files[syncPath] = info
+			files[canonicalRelPath(syncPath)] = info
 		}
 	}
 

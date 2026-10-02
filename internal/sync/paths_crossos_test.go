@@ -159,7 +159,9 @@ func TestRemoteKeysMapAcrossOS(t *testing.T) {
 	remote := posix.NormalizeRelPath(local)
 	got, ok := win.ResolveRelPath(remote)
 
-	want := "projects/" + EncodeClaudePath(winRoot2+`\`+project) + "/s.jsonl"
+	// A Windows folder is spelled with a lowercase drive letter everywhere, so
+	// one project is one string whichever launch first created the folder.
+	want := "projects/" + canonicalDriveLetter(EncodeClaudePath(winRoot2+`\`+project)) + "/s.jsonl"
 	if !ok || got != want {
 		t.Errorf("ResolveRelPath(%q) = %q (ok=%v), want %q", remote, got, ok, want)
 	}

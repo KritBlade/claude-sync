@@ -100,7 +100,7 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 			// C:/like/this, but that form shows up mostly inside quoted error
 			// text and tool output, and rewriting a device's own prose is worse
 			// than leaving one uncommon spelling unmapped.
-			root := regexp.QuoteMeta(renderLocalPath(localPath, kind, mp.windows))
+			root := driveLetterPattern(renderLocalPath(localPath, kind, mp.windows))
 			tail := `((?:` + separatorPattern(kind) + pathSegment + `)*)`
 			// Boundary-aware: only replace the path when it is not followed by a
 			// name character, so /Users/merv never matches inside /Users/mervynlally.
@@ -193,6 +193,53 @@ func EncodeClaudePath(p string) string {
 	return b.String()
 }
 
+// canonicalDriveLetter lowercases the drive letter of a Windows-encoded project
+// folder name, so one project is spelled one way on every device. Claude Code
+// encodes a working directory by replacing every non-alphanumeric character
+// with "-", so only a Windows path can produce "<letter>--…"; a POSIX path
+// always begins with "-". Which case a folder carries is decided by whichever
+// launch created it first — a terminal gives "C:", an editor may give "c:" —
+// and the two are the same directory to Windows but different strings to a
+// path_map entry, a state key and a remote key. The rest of the name is left
+// untouched.
+func canonicalDriveLetter(segment string) string {
+	if len(segment) >= 3 && segment[1] == '-' && segment[2] == '-' &&
+		segment[0] >= 'A' && segment[0] <= 'Z' {
+		return string(segment[0]-'A'+'a') + segment[1:]
+	}
+	return segment
+}
+
+// canonicalRelPath puts the project folder of a local relative path into its
+// canonical spelling. Paths outside projects/ and already-tokenized paths are
+// returned unchanged.
+func canonicalRelPath(relPath string) string {
+	segment, rest, isProject := splitProjectsPath(relPath)
+	if !isProject || strings.HasPrefix(segment, tokenPrefix) {
+		return relPath
+	}
+	return "projects/" + canonicalDriveLetter(segment) + rest
+}
+
+// driveLetterPattern quotes an absolute path for a regular expression, matching
+// either case of a Windows drive letter. Transcripts written before and after a
+// launch that used the other case both mention the same directory, so content
+// translation has to accept both spellings even though it emits only one.
+func driveLetterPattern(renderedPath string) string {
+	quoted := regexp.QuoteMeta(renderedPath)
+	if len(renderedPath) < 2 || renderedPath[1] != ':' {
+		return quoted
+	}
+	letter := renderedPath[0]
+	switch {
+	case letter >= 'A' && letter <= 'Z':
+		return "[" + string(letter) + string(letter-'A'+'a') + "]" + quoted[1:]
+	case letter >= 'a' && letter <= 'z':
+		return "[" + string(letter-'a'+'A') + string(letter) + "]" + quoted[1:]
+	}
+	return quoted
+}
+
 // Tokens use the ${NAME} form in both remote keys and file content. This
 // matches the format already written to existing buckets; note that a literal
 // "${HOME}" in transcript content (e.g. a quoted shell snippet) is therefore
@@ -227,12 +274,16 @@ func (m *PathMapper) NormalizeRelPath(relPath string) string {
 	if !ok || strings.HasPrefix(seg, tokenPrefix) {
 		return relPath
 	}
+	seg = canonicalDriveLetter(seg)
 	for _, mp := range m.mappings {
-		if seg == mp.encLocal || strings.HasPrefix(seg, mp.encLocal+"-") {
-			return "projects/" + pathToken(mp.name) + seg[len(mp.encLocal):] + rest
+		encLocal := canonicalDriveLetter(mp.encLocal)
+		if seg == encLocal || strings.HasPrefix(seg, encLocal+"-") {
+			return "projects/" + pathToken(mp.name) + seg[len(encLocal):] + rest
 		}
 	}
-	return relPath
+	// A folder no entry covers still goes up canonically, so the device that
+	// owns it and the device that only receives it agree on one remote key.
+	return "projects/" + seg + rest
 }
 
 // ResolveRelPath rewrites a portable remote path back to a local relative
@@ -243,13 +294,18 @@ func (m *PathMapper) ResolveRelPath(relPath string) (string, bool) {
 		return relPath, true
 	}
 	seg, rest, isProject := splitProjectsPath(relPath)
-	if !isProject || !strings.HasPrefix(seg, tokenPrefix) {
+	if !isProject {
 		return relPath, true
+	}
+	if !strings.HasPrefix(seg, tokenPrefix) {
+		// An untokenized key written by an older build can still carry an
+		// uppercase drive letter; land it in the canonical folder.
+		return "projects/" + canonicalDriveLetter(seg) + rest, true
 	}
 	for _, mp := range m.mappings {
 		token := pathToken(mp.name)
 		if strings.HasPrefix(seg, token) {
-			return "projects/" + mp.encLocal + seg[len(token):] + rest, true
+			return "projects/" + canonicalDriveLetter(mp.encLocal) + seg[len(token):] + rest, true
 		}
 	}
 	return relPath, false
