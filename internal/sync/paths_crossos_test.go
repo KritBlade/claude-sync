@@ -2,6 +2,8 @@ package sync
 
 import (
 	"encoding/json"
+	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -328,5 +330,66 @@ func TestWindowsRootConfiguredWithForwardSlashes(t *testing.T) {
 	}
 	if got := string(m.ResolveContent(sessionFile, remote)); got != in {
 		t.Errorf("round trip = %s, want %s", got, in)
+	}
+}
+
+//	/ mainResolve replicate the algorithm on main: replace only the
+//
+// root prefix, boundary-aware, and expand the token to the raw local path.
+func rootOnlyNormalize(home string, data []byte) []byte {
+	re := regexp.MustCompile(regexp.QuoteMeta(home) + `([^A-Za-z0-9_.-]|$)`)
+	return re.ReplaceAll(data, []byte("$${HOME}${1}"))
+}
+
+func rootOnlyResolve(home string, data []byte) []byte {
+	return []byte(strings.ReplaceAll(string(data), "${HOME}", home))
+}
+
+// Separator-aware mapping must be byte-identical to the root-only mapping for a
+// POSIX device whose home holds no backslash - that is every existing POSIX
+// user. Anything else would change the meaning of content already on a bucket.
+func TestPosixContentMappingIsBackwardCompatible(t *testing.T) {
+	const home = "/Users/alice"
+	m, err := NewPathMapper(home, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	corpus := []string{
+		`{"cwd":"/Users/alice/projects/app"}`,
+		`{"cwd":"/Users/alice"}`,
+		`/Users/alice`,
+		`/Users/alicia/x`,
+		`/Users/alice.bak/x`,
+		`/Users/alice-old/x`,
+		`{"f":"/Users/alice/.claude/settings.json","g":"/Users/alice/a/b/c.txt"}`,
+		`see /Users/alice/Library/Application Support/Code/User`,
+		`{"command":"cd /Users/alice/My\\ Documents && ls"}`,
+		`{"t":"/Users/alice/projects\nnext"}`,
+		`{"err":"no such file: /Users/alice/x/y.go:12"}`,
+		`{"a":"/Users/alice/x","b":"/Users/alice/x"}`,
+		`prefix/Users/alice/x`,
+		`{"u":"https://example.com/Users/alice/x"}`,
+		`{"p":"/Users/alice//double/slash"}`,
+		`{"p":"/Users/alice/trailing/"}`,
+		`{"home":"${HOME}/already/tokenized"}`,
+		`/Users/alice/a_b-c.d/e`,
+		`{"m":"/Users/alice/x", "n":"/Users/alicebob/y"}`,
+	}
+
+	for _, relPath := range []string{"projects/x/s.jsonl", "projects/x/n.md"} {
+		for _, in := range corpus {
+			wantRemote := string(rootOnlyNormalize(home, []byte(in)))
+			gotRemote := string(m.NormalizeContent(relPath, []byte(in)))
+			if gotRemote != wantRemote {
+				t.Errorf("[%s] normalize diverges\n in   = %s\n old  = %s\n new  = %s", relPath, in, wantRemote, gotRemote)
+			}
+
+			wantLocal := string(rootOnlyResolve(home, []byte(wantRemote)))
+			gotLocal := string(m.ResolveContent(relPath, []byte(gotRemote)))
+			if gotLocal != wantLocal {
+				t.Errorf("[%s] resolve diverges\n remote = %s\n old    = %s\n new    = %s", relPath, gotRemote, wantLocal, gotLocal)
+			}
+		}
 	}
 }
