@@ -55,11 +55,16 @@ const (
 // stops at the first character that is not plainly part of a file name, so
 // prose following a path is never rewritten.
 //
-// Known limitation: a space is not part of a segment, so a tail stops there and
-// the remainder keeps the pushing device's separators. "Application Support" on
-// POSIX or "My Documents" on Windows therefore still crosses over with a mixed
-// separator. Admitting a space into a segment is not the fix - the tail would
-// then swallow the prose after a path, which is strictly worse.
+// Known limitation: the class is narrower than a real file name. A space, "@",
+// "(", ")", "+", "~", "=", "," and every non-ASCII rune all end a segment, so
+// the tail stops there and the remainder keeps the pushing device's separators.
+// A Windows device pushing node_modules\@babel\core therefore hands a POSIX
+// device ".../node_modules/@babel\core", whose backslashes are literal - the
+// path is wrong, not merely spelled oddly, and scoped packages make this the
+// common case rather than a corner. Widening the class is not obviously safe
+// either: the tail would reach further into quoted tool output and prose, which
+// is how an earlier revision came to rewrite a PowerShell error message. Left
+// deliberately narrow pending a decision on how aggressive matching should be.
 const pathSegment = `[A-Za-z0-9_.-]*`
 
 type pathMapping struct {
@@ -86,7 +91,16 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 	m := &PathMapper{}
 
 	add := func(name, localPath string) error {
-		localPath = strings.TrimRight(localPath, `/\`)
+		// Trim a trailing separator. A backslash only separates on a Windows
+		// path; on POSIX it is a legal character in a directory name, so a
+		// directory genuinely named `odd\` keeps its backslash rather than
+		// collapsing onto the unrelated `odd/` subtree.
+		windows := isWindowsLocalPath(localPath)
+		if windows {
+			localPath = strings.TrimRight(localPath, `/\`)
+		} else {
+			localPath = strings.TrimRight(localPath, "/")
+		}
 		if localPath == "" {
 			return nil
 		}
@@ -99,7 +113,6 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 		// separator so the matched root, the separator emitted on pull and the
 		// canonical remote tail all agree. EncodeClaudePath flattens both
 		// separators to "-", so remote keys are unaffected.
-		windows := isWindowsLocalPath(localPath)
 		if windows {
 			localPath = strings.ReplaceAll(localPath, "/", `\`)
 		}
@@ -111,7 +124,7 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 			windows:   windows,
 		}
 
-		for _, kind := range []pathContentKind{pathContentPlain, pathContentJSON} {
+		for kind := pathContentKind(0); kind < numPathContentKinds; kind++ {
 			// Only the root's native spelling is matched. Windows also accepts
 			// C:/like/this, but that form shows up mostly inside quoted error
 			// text and tool output, and rewriting a device's own prose is worse
@@ -307,22 +320,47 @@ func (m *PathMapper) NormalizeContent(relPath string, data []byte) []byte {
 	}
 	kind := pathContentKindFor(relPath)
 	for i := range m.mappings {
-		mp := &m.mappings[i]
-		re := mp.normRe[kind]
-		token := []byte(pathToken(mp.name))
-		data = re.ReplaceAllFunc(data, func(match []byte) []byte {
-			sub := re.FindSubmatch(match)
-			if sub == nil {
-				return match
-			}
-			out := make([]byte, 0, len(token)+len(sub[1])+len(sub[2]))
-			out = append(out, token...)
-			out = append(out, canonicalizeTail(sub[1], kind, mp.windows)...)
-			out = append(out, sub[2]...)
-			return out
-		})
+		data = m.mappings[i].normalize(data, kind)
 	}
 	return data
+}
+
+// normalize rewrites every occurrence of this mapping's root in data.
+//
+// The pass repeats while the literal root is still present, because the tail is
+// greedy: "~/a/Users/alice/b" is consumed by a single match and scanning resumes
+// past it, so a root nested inside another path would otherwise be uploaded
+// verbatim and fail to resolve on the other device. The bytes.Contains guard
+// keeps the repeat off the hot path - content holding one occurrence per match,
+// which is nearly all of it, is done after a single pass.
+func (mp *pathMapping) normalize(data []byte, kind pathContentKind) []byte {
+	re := mp.normRe[kind]
+	root := []byte(mp.localIn[kind])
+	token := []byte(pathToken(mp.name))
+
+	for {
+		matches := re.FindAllSubmatchIndex(data, -1)
+		if len(matches) == 0 {
+			return data
+		}
+
+		out := make([]byte, 0, len(data))
+		prev := 0
+		for _, mi := range matches {
+			out = append(out, data[prev:mi[0]]...)
+			out = append(out, token...)
+			out = append(out, canonicalizeTail(data[mi[2]:mi[3]], kind, mp.windows)...)
+			out = append(out, data[mi[4]:mi[5]]...)
+			prev = mi[1]
+		}
+		data = append(out, data[prev:]...)
+
+		// Every match replaced one literal root with a token, so each pass makes
+		// progress and a pass that matches nothing ends the loop.
+		if !bytes.Contains(data, root) {
+			return data
+		}
+	}
 }
 
 // ResolveContent replaces portable tokens with this device's local paths,
@@ -337,20 +375,26 @@ func (m *PathMapper) ResolveContent(relPath string, data []byte) []byte {
 		re := mp.resolveRe
 		local := []byte(mp.localIn[kind])
 		sep := []byte(localSeparator(kind, mp.windows))
-		data = re.ReplaceAllFunc(data, func(match []byte) []byte {
-			sub := re.FindSubmatch(match)
-			if sub == nil {
-				return match
-			}
-			tail := sub[1]
-			if mp.windows {
-				tail = bytes.ReplaceAll(tail, []byte("/"), sep)
-			}
-			out := make([]byte, 0, len(local)+len(tail))
+
+		matches := re.FindAllSubmatchIndex(data, -1)
+		if len(matches) == 0 {
+			continue
+		}
+
+		out := make([]byte, 0, len(data))
+		prev := 0
+		for _, mi := range matches {
+			out = append(out, data[prev:mi[0]]...)
 			out = append(out, local...)
-			out = append(out, tail...)
-			return out
-		})
+			tail := data[mi[2]:mi[3]]
+			if mp.windows {
+				out = append(out, bytes.ReplaceAll(tail, []byte("/"), sep)...)
+			} else {
+				out = append(out, tail...)
+			}
+			prev = mi[1]
+		}
+		data = append(out, data[prev:]...)
 	}
 	return data
 }

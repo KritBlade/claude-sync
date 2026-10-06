@@ -393,3 +393,41 @@ func TestPosixContentMappingIsBackwardCompatible(t *testing.T) {
 		}
 	}
 }
+
+// The greedy tail consumes a root nested inside another path in a single match,
+// so normalize has to repeat or the nested occurrence is uploaded verbatim and
+// never resolves on the other device.
+func TestNestedRootOccurrenceIsTokenized(t *testing.T) {
+	m := mapperFor(t, posixHome, posixRoot)
+
+	cases := []struct{ in, want string }{
+		{`/Users/alice/a/Users/alice/b`, `${HOME}/a${HOME}/b`},
+		{`/Users/alice/backup/Users/alice/old/x`, `${HOME}/backup${HOME}/old/x`},
+		{`/Users/alice/projects/a/Users/alice/projects/b`, `${WORK}/a${WORK}/b`},
+		// A longer sibling must still not match, and must not loop forever.
+		{`/Users/alice/x /Users/alicexyz/y`, `${HOME}/x /Users/alicexyz/y`},
+	}
+
+	for _, tc := range cases {
+		if got := string(m.NormalizeContent(memoFile, []byte(tc.in))); got != tc.want {
+			t.Errorf("NormalizeContent(%s) = %s, want %s", tc.in, got, tc.want)
+		}
+	}
+}
+
+// A trailing backslash is a separator to strip only on Windows. On POSIX it is
+// part of the directory name, so stripping it would silently widen the token to
+// a different directory.
+func TestTrailingBackslashKeptOnPosixRoot(t *testing.T) {
+	m, err := NewPathMapper("/Users/alice", map[string]string{`/Users/alice/odd\`: "ODD"})
+	if err != nil {
+		t.Fatalf("NewPathMapper: %v", err)
+	}
+
+	if got := string(m.NormalizeContent(memoFile, []byte(`/Users/alice/odd/sub/x`))); strings.Contains(got, "${ODD}") {
+		t.Errorf("the odd/ subtree was captured by ODD: %s", got)
+	}
+	if got := string(m.NormalizeContent(memoFile, []byte(`/Users/alice/odd\/sub/x`))); !strings.Contains(got, "${ODD}") {
+		t.Errorf(`the odd\ directory was not matched: %s`, got)
+	}
+}
