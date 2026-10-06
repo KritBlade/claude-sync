@@ -271,15 +271,62 @@ func TestWindowsPathDetection(t *testing.T) {
 	}
 }
 
+// A POSIX home holding a backslash has to be matched in its escaped spelling in
+// .jsonl and emitted the same way, or the token expands to an invalid escape
+// sequence and the transcript stops parsing.
 func TestPosixHomeContainingBackslashRoundTrips(t *testing.T) {
 	m, err := NewPathMapper(`/Users/al\ice`, nil)
 	if err != nil {
 		t.Fatalf("NewPathMapper: %v", err)
 	}
 
-	in := `{"cwd":"/Users/al\\ice/projects/app"}`
+	cases := []struct {
+		name       string
+		relPath    string
+		in, remote string
+	}{
+		{"jsonl escapes the backslash", sessionFile, `{"cwd":"/Users/al\\ice/projects/app"}`, `{"cwd":"${HOME}/projects/app"}`},
+		{"markdown holds it raw", memoFile, `see /Users/al\ice/projects/app`, `see ${HOME}/projects/app`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := m.NormalizeContent(tc.relPath, []byte(tc.in))
+			if string(remote) != tc.remote {
+				t.Errorf("NormalizeContent = %s, want %s", remote, tc.remote)
+			}
+			if got := string(m.ResolveContent(tc.relPath, remote)); got != tc.in {
+				t.Errorf("round trip changed content\n in  = %s\n out = %s", tc.in, got)
+			}
+		})
+	}
+
+	// The resolved .jsonl still has to parse.
+	remote := []byte(`{"cwd":"${HOME}/projects/app"}`)
+	out := m.ResolveContent(sessionFile, remote)
+	var v map[string]any
+	if err := json.Unmarshal(out, &v); err != nil {
+		t.Fatalf("resolved content is not valid JSON: %v\ncontent: %s", err, out)
+	}
+	if v["cwd"] != `/Users/al\ice/projects/app` {
+		t.Errorf("decoded cwd = %v", v["cwd"])
+	}
+}
+
+// A Windows root is often configured with forward slashes, because "C:\work" is
+// not a valid escape in YAML. It must behave the same as the native spelling.
+func TestWindowsRootConfiguredWithForwardSlashes(t *testing.T) {
+	m, err := NewPathMapper(winHome, map[string]string{`C:/work/projects`: "WORK"})
+	if err != nil {
+		t.Fatalf("NewPathMapper: %v", err)
+	}
+
+	in := `{"cwd":"C:\\work\\projects\\app"}`
 	remote := m.NormalizeContent(sessionFile, []byte(in))
+	if string(remote) != `{"cwd":"${WORK}/app"}` {
+		t.Errorf("NormalizeContent = %s, want %s", remote, `{"cwd":"${WORK}/app"}`)
+	}
 	if got := string(m.ResolveContent(sessionFile, remote)); got != in {
-		t.Errorf("round trip changed content\n in     = %s\n out    = %s\n remote = %s", in, got, remote)
+		t.Errorf("round trip = %s, want %s", got, in)
 	}
 }

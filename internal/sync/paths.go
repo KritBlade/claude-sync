@@ -54,6 +54,12 @@ const (
 // pathSegment matches one path component. Deliberately conservative: a tail
 // stops at the first character that is not plainly part of a file name, so
 // prose following a path is never rewritten.
+//
+// Known limitation: a space is not part of a segment, so a tail stops there and
+// the remainder keeps the pushing device's separators. "Application Support" on
+// POSIX or "My Documents" on Windows therefore still crosses over with a mixed
+// separator. Admitting a space into a segment is not the fix - the tail would
+// then swallow the prose after a path, which is strictly worse.
 const pathSegment = `[A-Za-z0-9_.-]*`
 
 type pathMapping struct {
@@ -88,11 +94,21 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 			return fmt.Errorf("invalid path_map token %q: use uppercase letters, digits, underscores (e.g. WORK)", name)
 		}
 
+		// A Windows path is often configured with forward slashes, because
+		// "C:\work" is not a valid escape in YAML. Canonicalize it to the native
+		// separator so the matched root, the separator emitted on pull and the
+		// canonical remote tail all agree. EncodeClaudePath flattens both
+		// separators to "-", so remote keys are unaffected.
+		windows := isWindowsLocalPath(localPath)
+		if windows {
+			localPath = strings.ReplaceAll(localPath, "/", `\`)
+		}
+
 		mp := pathMapping{
 			name:      name,
 			localPath: localPath,
 			encLocal:  EncodeClaudePath(localPath),
-			windows:   isWindowsLocalPath(localPath),
+			windows:   windows,
 		}
 
 		for _, kind := range []pathContentKind{pathContentPlain, pathContentJSON} {
@@ -100,13 +116,13 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 			// C:/like/this, but that form shows up mostly inside quoted error
 			// text and tool output, and rewriting a device's own prose is worse
 			// than leaving one uncommon spelling unmapped.
-			root := regexp.QuoteMeta(renderLocalPath(localPath, kind, mp.windows))
+			root := regexp.QuoteMeta(renderLocalPath(localPath, kind))
 			tail := `((?:` + separatorPattern(kind, mp.windows) + pathSegment + `)*)`
 			// Boundary-aware: only replace the path when it is not followed by a
 			// name character, so /Users/merv never matches inside /Users/mervynlally.
 			boundary := `([^A-Za-z0-9_.-]|$)`
 			mp.normRe[kind] = regexp.MustCompile(root + tail + boundary)
-			mp.localIn[kind] = renderLocalPath(localPath, kind, mp.windows)
+			mp.localIn[kind] = renderLocalPath(localPath, kind)
 		}
 
 		mp.resolveRe = regexp.MustCompile(regexp.QuoteMeta(pathToken(name)) + `((?:/` + pathSegment + `)*)`)
@@ -169,8 +185,11 @@ func separatorPattern(kind pathContentKind, windows bool) string {
 }
 
 // renderLocalPath spells an absolute local path for the given content kind.
-func renderLocalPath(p string, kind pathContentKind, windows bool) string {
-	if windows && kind == pathContentJSON {
+// Escaping follows the file format, not the platform: a backslash is legal in a
+// POSIX directory name too, and writing it raw into .jsonl would produce an
+// invalid escape sequence and stop the file parsing.
+func renderLocalPath(p string, kind pathContentKind) string {
+	if kind == pathContentJSON {
 		return strings.ReplaceAll(p, `\`, `\\`)
 	}
 	return p
