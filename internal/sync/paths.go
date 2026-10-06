@@ -101,7 +101,7 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 			// text and tool output, and rewriting a device's own prose is worse
 			// than leaving one uncommon spelling unmapped.
 			root := regexp.QuoteMeta(renderLocalPath(localPath, kind, mp.windows))
-			tail := `((?:` + separatorPattern(kind) + pathSegment + `)*)`
+			tail := `((?:` + separatorPattern(kind, mp.windows) + pathSegment + `)*)`
 			// Boundary-aware: only replace the path when it is not followed by a
 			// name character, so /Users/merv never matches inside /Users/mervynlally.
 			boundary := `([^A-Za-z0-9_.-]|$)`
@@ -137,9 +137,15 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 	return m, nil
 }
 
-// separatorPattern matches a path separator as it appears in this content kind:
-// a forward slash, or a backslash spelled the way the format escapes it.
-func separatorPattern(kind pathContentKind) string {
+// separatorPattern matches a path separator as it appears in this content kind,
+// for a mapping rooted on this kind of device. A backslash is only a separator
+// on a Windows mapping; on a POSIX one it is an escape character, so treating it
+// as a separator would rewrite "~/My\ Documents" into "~/My/ Documents" and
+// corrupt any shell command quoted in a transcript.
+func separatorPattern(kind pathContentKind, windows bool) string {
+	if !windows {
+		return "/"
+	}
 	if kind == pathContentJSON {
 		return `(?:\\\\|/)`
 	}
@@ -276,7 +282,7 @@ func (m *PathMapper) NormalizeContent(relPath string, data []byte) []byte {
 			}
 			out := make([]byte, 0, len(token)+len(sub[1])+len(sub[2]))
 			out = append(out, token...)
-			out = append(out, canonicalizeTail(sub[1], kind)...)
+			out = append(out, canonicalizeTail(sub[1], kind, mp.windows)...)
 			out = append(out, sub[2]...)
 			return out
 		})
@@ -315,8 +321,12 @@ func (m *PathMapper) ResolveContent(relPath string, data []byte) []byte {
 }
 
 // canonicalizeTail rewrites the separators of a matched path tail to "/" so the
-// remote form does not depend on which OS pushed it.
-func canonicalizeTail(tail []byte, kind pathContentKind) []byte {
+// remote form does not depend on which OS pushed it. A POSIX tail is already
+// "/"-separated; its backslashes are escapes and must survive untouched.
+func canonicalizeTail(tail []byte, kind pathContentKind, windows bool) []byte {
+	if !windows {
+		return tail
+	}
 	if kind == pathContentJSON {
 		return bytes.ReplaceAll(tail, []byte(`\\`), []byte("/"))
 	}

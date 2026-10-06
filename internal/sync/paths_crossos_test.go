@@ -164,3 +164,85 @@ func TestRemoteKeysMapAcrossOS(t *testing.T) {
 		t.Errorf("ResolveRelPath(%q) = %q (ok=%v), want %q", remote, got, ok, want)
 	}
 }
+
+// A backslash only separates path segments on a Windows mapping. On a POSIX
+// mapping it is an escape character, and transcripts are full of shell commands
+// that rely on it, so it has to survive a round trip untouched.
+func TestPosixBackslashIsEscapeNotSeparator(t *testing.T) {
+	posix := mapperFor(t, posixHome, posixRoot)
+
+	cases := []struct {
+		name    string
+		relPath string
+		in      string
+	}{
+		{"escaped space in a jsonl command", sessionFile, `{"command":"cd /Users/alice/My\\ Documents"}`},
+		{"escaped space in markdown", memoFile, `run cd /Users/alice/My\ Documents first`},
+		{"newline escape after a mapped path", sessionFile, `{"t":"/Users/alice/projects\nnext"}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			remote := posix.NormalizeContent(tc.relPath, []byte(tc.in))
+			got := string(posix.ResolveContent(tc.relPath, remote))
+			if got != tc.in {
+				t.Errorf("round trip changed content\n in     = %s\n out    = %s\n remote = %s", tc.in, got, remote)
+			}
+		})
+	}
+}
+
+// WORK sits under HOME, so the longest local path has to win or the more
+// specific token is never produced.
+func TestNestedMappingPrefersLongestPath(t *testing.T) {
+	m := mapperFor(t, posixHome, posixRoot)
+
+	in := []byte(`{"cwd":"/Users/alice/projects/app","home":"/Users/alice/.claude/x"}`)
+	want := `{"cwd":"${WORK}/app","home":"${HOME}/.claude/x"}`
+	if got := string(m.NormalizeContent(sessionFile, in)); got != want {
+		t.Errorf("NormalizeContent = %s, want %s", got, want)
+	}
+}
+
+// Pull then push has to reproduce the remote bytes exactly. If it does not, every
+// sync after a pull sees a changed hash and reports a phantom modification.
+func TestResolveThenNormalizeIsStable(t *testing.T) {
+	devices := []struct {
+		name       string
+		home, root string
+	}{
+		{"posix", posixHome, posixRoot},
+		{"windows", winHome, winRoot2},
+	}
+
+	for _, d := range devices {
+		t.Run(d.name, func(t *testing.T) {
+			m := mapperFor(t, d.home, d.root)
+			for _, relPath := range []string{sessionFile, memoFile} {
+				remote := []byte(`{"cwd":"${WORK}/app","h":"${HOME}/.claude"}`)
+				local := m.ResolveContent(relPath, remote)
+				if again := m.NormalizeContent(relPath, local); string(again) != string(remote) {
+					t.Errorf("%s is not stable\n remote = %s\n local  = %s\n again  = %s", relPath, remote, local, again)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeContentIsIdempotent(t *testing.T) {
+	posix := mapperFor(t, posixHome, posixRoot)
+
+	once := posix.NormalizeContent(sessionFile, []byte(`{"cwd":"/Users/alice/projects/app"}`))
+	if twice := posix.NormalizeContent(sessionFile, once); string(twice) != string(once) {
+		t.Errorf("second pass changed content: %s then %s", once, twice)
+	}
+}
+
+func TestConflictCopyInheritsContentKind(t *testing.T) {
+	if got := pathContentKindFor("projects/x/s.jsonl.conflict.20260101-120000"); got != pathContentJSON {
+		t.Errorf("conflict copy of .jsonl = %v, want JSON", got)
+	}
+	if got := pathContentKindFor("projects/x/n.md.conflict.20260101-120000"); got != pathContentPlain {
+		t.Errorf("conflict copy of .md = %v, want plain", got)
+	}
+}
