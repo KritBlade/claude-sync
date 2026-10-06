@@ -246,3 +246,40 @@ func TestConflictCopyInheritsContentKind(t *testing.T) {
 		t.Errorf("conflict copy of .md = %v, want plain", got)
 	}
 }
+
+// A backslash is a legal character in a POSIX directory name, so "contains a
+// backslash" is not the same question as "is a Windows path". Getting those
+// confused rewrites a POSIX device's own "/" separators into backslashes.
+func TestWindowsPathDetection(t *testing.T) {
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{`C:\Users\bob`, true},
+		{`d:\projects`, true},
+		{`\\server\share`, true},
+		{`C:`, true},
+		{`/Users/alice`, false},
+		{`/Users/al\ice`, false},
+		{`/home/user/My\ Documents`, false},
+	}
+
+	for _, tc := range cases {
+		if got := isWindowsLocalPath(tc.path); got != tc.want {
+			t.Errorf("isWindowsLocalPath(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestPosixHomeContainingBackslashRoundTrips(t *testing.T) {
+	m, err := NewPathMapper(`/Users/al\ice`, nil)
+	if err != nil {
+		t.Fatalf("NewPathMapper: %v", err)
+	}
+
+	in := `{"cwd":"/Users/al\\ice/projects/app"}`
+	remote := m.NormalizeContent(sessionFile, []byte(in))
+	if got := string(m.ResolveContent(sessionFile, remote)); got != in {
+		t.Errorf("round trip changed content\n in     = %s\n out    = %s\n remote = %s", in, got, remote)
+	}
+}

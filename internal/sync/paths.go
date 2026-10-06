@@ -92,7 +92,7 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 			name:      name,
 			localPath: localPath,
 			encLocal:  EncodeClaudePath(localPath),
-			windows:   strings.Contains(localPath, `\`),
+			windows:   isWindowsLocalPath(localPath),
 		}
 
 		for _, kind := range []pathContentKind{pathContentPlain, pathContentJSON} {
@@ -135,6 +135,22 @@ func NewPathMapper(homeDir string, userMap map[string]string) (*PathMapper, erro
 	})
 
 	return m, nil
+}
+
+// isWindowsLocalPath reports whether an absolute path is spelled the Windows
+// way: a drive letter ("C:\\...") or a UNC share ("\\\\server\\share"). A plain
+// "contains a backslash" test would be wrong, because a backslash is a legal
+// character in a POSIX directory name and claiming such a path is Windows
+// rewrites its "/" separators into backslashes.
+func isWindowsLocalPath(p string) bool {
+	if strings.HasPrefix(p, `\\`) {
+		return true
+	}
+	if len(p) >= 2 && p[1] == ':' {
+		c := p[0]
+		return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+	}
+	return false
 }
 
 // separatorPattern matches a path separator as it appears in this content kind,
