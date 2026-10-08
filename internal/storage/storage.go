@@ -3,6 +3,8 @@ package storage
 import (
 	"context"
 	"fmt"
+	"os"
+	"strconv"
 	"time"
 )
 
@@ -16,9 +18,29 @@ const (
 	ProviderWebDAV Provider = "webdav"
 )
 
-// MaxDownloadSize is the maximum allowed size for a single downloaded object (100MB).
-// This prevents memory exhaustion from oversized or malicious remote files.
-const MaxDownloadSize = 100 * 1024 * 1024
+// MaxDownloadSize is the maximum allowed size for a single downloaded object.
+// It caps how much a provider will buffer into memory, guarding against
+// oversized or malicious remote files. Defaults to 500MB and can be overridden
+// with the CLAUDE_SYNC_MAX_DOWNLOAD_MB environment variable (value in MB).
+var MaxDownloadSize int64 = 500 * 1024 * 1024
+
+// WarnUploadSize is the per-file size at or above which push prints a warning,
+// so the user knows a session file is approaching MaxDownloadSize and should
+// start a fresh session. Overridable with CLAUDE_SYNC_WARN_UPLOAD_MB (MB).
+var WarnUploadSize int64 = 450 * 1024 * 1024
+
+func init() {
+	if v := os.Getenv("CLAUDE_SYNC_MAX_DOWNLOAD_MB"); v != "" {
+		if mb, err := strconv.Atoi(v); err == nil && mb > 0 {
+			MaxDownloadSize = int64(mb) * 1024 * 1024
+		}
+	}
+	if v := os.Getenv("CLAUDE_SYNC_WARN_UPLOAD_MB"); v != "" {
+		if mb, err := strconv.Atoi(v); err == nil && mb > 0 {
+			WarnUploadSize = int64(mb) * 1024 * 1024
+		}
+	}
+}
 
 // ObjectInfo contains metadata about a stored object
 type ObjectInfo struct {

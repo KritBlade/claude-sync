@@ -60,6 +60,7 @@ type SyncResult struct {
 	Deleted    []string
 	Conflicts  []string
 	Errors     []error
+	Warnings   []string
 }
 
 type ProgressEvent struct {
@@ -224,6 +225,17 @@ func (s *Syncer) Push(ctx context.Context) (*SyncResult, error) {
 					Current: n,
 					Total:   total,
 				})
+
+				if change.LocalSize >= storage.WarnUploadSize {
+					mu.Lock()
+					result.Warnings = append(result.Warnings, fmt.Sprintf(
+						"%s is %d MB (limit %d MB) — start a new session soon so this file stays syncable",
+						change.Path,
+						change.LocalSize/(1024*1024),
+						storage.MaxDownloadSize/(1024*1024),
+					))
+					mu.Unlock()
+				}
 
 				if err := s.uploadFile(ctx, change.Path); err != nil {
 					s.progress(ProgressEvent{

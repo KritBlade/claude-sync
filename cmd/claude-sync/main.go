@@ -1102,6 +1102,13 @@ func pushCmd() *cobra.Command {
 				}
 			}
 
+			if len(result.Warnings) > 0 {
+				fmt.Printf("\n%s/!\\ Large session warning:%s\n", colorYellow, colorReset)
+				for _, w := range result.Warnings {
+					fmt.Printf("  %s-%s %s\n", colorYellow, colorReset, w)
+				}
+			}
+
 			// MCP sync if enabled
 			if includeMCP || cfg.IsMCPSyncEnabled() {
 				if err := runMCPPush(ctx, syncer); err != nil {
