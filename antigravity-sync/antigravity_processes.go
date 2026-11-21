@@ -1,7 +1,8 @@
 package main
 
 import (
-	"encoding/csv"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -69,38 +70,53 @@ func usesAntigravityDataDirectory(arguments []string) bool {
 	return false
 }
 
+// windowsProcessQuery prints the Antigravity app and agy processes, with their command lines, as a JSON array.
+// tasklist shows no command lines, and only its arguments tell an agy hub from an agy CLI session. The script
+// holds no double quote, so Go's Windows argument quoting passes it to PowerShell unchanged.
+const windowsProcessQuery = `[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; ` +
+	`ConvertTo-Json -Compress -InputObject @(Get-CimInstance Win32_Process ` +
+	`-Filter 'Name = ''agy.exe'' OR Name = ''Antigravity.exe''' | Select-Object ProcessId, Name, CommandLine)`
+
+type windowsProcess struct {
+	ProcessID   int    `json:"ProcessId"`
+	Name        string `json:"Name"`
+	CommandLine string `json:"CommandLine"`
+}
+
 func findWindowsAntigravityProcesses() ([]antigravityProcess, error) {
-	output, err := exec.Command("tasklist", "/fo", "csv", "/nh").Output()
+	output, err := exec.Command("powershell.exe", "-NoProfile", "-NonInteractive", "-Command", windowsProcessQuery).Output()
 	if err != nil {
 		return nil, fmt.Errorf("list processes: %w", err)
 	}
-	records, err := csv.NewReader(strings.NewReader(string(output))).ReadAll()
-	if err != nil {
+	return parseWindowsProcesses(output, os.Getpid())
+}
+
+// parseWindowsProcesses reads windowsProcessQuery's output, leaving out ownProcessID.
+func parseWindowsProcesses(output []byte, ownProcessID int) ([]antigravityProcess, error) {
+	var listed []windowsProcess
+	if err := json.Unmarshal(bytes.TrimSpace(output), &listed); err != nil {
 		return nil, fmt.Errorf("read process list: %w", err)
 	}
 	var processes []antigravityProcess
-	for _, record := range records {
-		if len(record) < 2 {
+	for _, process := range listed {
+		if process.ProcessID == ownProcessID {
 			continue
 		}
-		imageName := strings.ToLower(record[0])
-		processID, err := strconv.Atoi(record[1])
-		if err != nil {
-			continue
-		}
-		switch {
-		case strings.HasPrefix(imageName, "antigravity"):
-			processes = append(processes, antigravityProcess{processID: processID, description: record[0]})
-		case imageName == "agy.exe":
-			// tasklist does not show arguments, so any agy may be a hub using ~/.gemini/antigravity.
-			processes = append(processes, antigravityProcess{processID: processID, description: "agy", isHub: true})
+		switch strings.ToLower(process.Name) {
+		case "antigravity.exe":
+			processes = append(processes, antigravityProcess{processID: process.ProcessID, description: "Antigravity app"})
+		case "agy.exe":
+			if usesAntigravityDataDirectory(strings.Fields(process.CommandLine)) {
+				processes = append(processes, antigravityProcess{processID: process.ProcessID, description: "agy hub", isHub: true})
+			}
 		}
 	}
 	return processes, nil
 }
 
 // ensureAntigravityStopped returns nil when nothing holds the conversation files. With shouldStopHub it first
-// asks running agy hubs to exit and waits up to ten seconds; the Antigravity app is never closed for the user.
+// stops running agy hubs and waits up to ten seconds for them to exit; the Antigravity app is never closed for
+// the user.
 func ensureAntigravityStopped(shouldStopHub bool) error {
 	processes, err := findAntigravityProcesses()
 	if err != nil {
@@ -146,9 +162,15 @@ func hasHub(processes []antigravityProcess) bool {
 	return false
 }
 
+// stopProcess sends SIGTERM on Unix. On Windows the hub is a console process with no window, which taskkill
+// can end only with /F; SQLite's journal keeps the conversation files consistent when a process ends that way.
 func stopProcess(processID int) error {
 	if runtime.GOOS == "windows" {
-		return exec.Command("taskkill", "/PID", strconv.Itoa(processID)).Run()
+		output, err := exec.Command("taskkill", "/F", "/PID", strconv.Itoa(processID)).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(output)))
+		}
+		return nil
 	}
 	process, err := os.FindProcess(processID)
 	if err != nil {
