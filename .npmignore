@@ -11,8 +11,9 @@ bin/claude-sync.exe
 bin/claude-sync-*
 bin/tests/
 
-# ccsync wrapper scripts: installed by hand, see ccsync/README.md
+# ccsync wrapper scripts and the antigravity-sync module: installed by hand, see their READMEs
 ccsync/
+antigravity-sync/
 # Fork maintenance notes
 Upgrade-local.md
 

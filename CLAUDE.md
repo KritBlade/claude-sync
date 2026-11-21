@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-**This checkout is a fork** (KritBlade/claude-sync of tawanorg/claude-sync). Its `main` is the latest upstream release with the fork's own commits and the `ccsync/` wrapper on top. Before any `git pull`, rebase, upgrade to a new upstream release or re-clone, read [Upgrade-local.md](Upgrade-local.md).
+**This checkout is a fork** (KritBlade/claude-sync of tawanorg/claude-sync). Its `main` is the latest upstream release with the fork's own commits, the `ccsync/` wrapper and the `antigravity-sync/` module on top. Before any `git pull`, rebase, upgrade to a new upstream release or re-clone, read [Upgrade-local.md](Upgrade-local.md).
 
 ## Repository Purpose
 
