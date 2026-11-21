@@ -15,6 +15,7 @@ import (
 func TestCreateBackupSetsRestrictivePermissions(t *testing.T) {
 	tmpHome := t.TempDir()
 	t.Setenv("HOME", tmpHome)
+	t.Setenv("USERPROFILE", tmpHome) // os.UserHomeDir reads USERPROFILE on Windows
 
 	// Populate ~/.claude with a file inside a syncable subdirectory so that
 	// createBackup also creates a nested directory we can stat.

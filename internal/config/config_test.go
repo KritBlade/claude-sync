@@ -93,6 +93,7 @@ func TestSaveAndLoad(t *testing.T) {
 	// Create a temporary directory to use as home
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir) // os.UserHomeDir reads USERPROFILE on Windows
 
 	// Create config directory
 	configDir := filepath.Join(tmpDir, ConfigDir)
@@ -161,6 +162,7 @@ encryption_key_path: ~/.claude-sync/age-key.txt
 func TestLoadNotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir) // os.UserHomeDir reads USERPROFILE on Windows
 
 	_, err := Load()
 	if err == nil {
@@ -175,6 +177,7 @@ func TestLoadNotFound(t *testing.T) {
 func TestExists(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("USERPROFILE", tmpDir) // os.UserHomeDir reads USERPROFILE on Windows
 
 	// Should not exist initially
 	if Exists() {
