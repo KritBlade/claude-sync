@@ -9,6 +9,10 @@ internal/
 bin/claude-sync
 bin/claude-sync.exe
 bin/claude-sync-*
+bin/tests/
+
+# ccsync wrapper scripts: installed by hand, see ccsync/README.md
+ccsync/
 
 # Development
 .git/

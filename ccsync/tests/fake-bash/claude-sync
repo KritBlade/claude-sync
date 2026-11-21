@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake claude-sync for the ccsync harness: logs its arguments and prints canned output from $FAKE_DIR.
+printf '%s\n' "$*" >> "$FAKE_DIR/calls.log"
+case "${1:-}" in
+    pull) [ -f "$FAKE_DIR/pull.txt" ] && cat "$FAKE_DIR/pull.txt" ;;
+    diff) cat "$FAKE_DIR/diff.txt" ;;
+esac
+exit 0

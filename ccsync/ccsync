@@ -1,0 +1,488 @@
+#!/usr/bin/env bash
+# ccsync v1.17.2-patch1 - wrapper around claude-sync, which syncs ~/.claude through encrypted cloud storage
+#
+#   ccsync pull     -> claude-sync pull, then apply the other machine's deletions, then claude-sync rebuild-history
+#   ccsync push     -> claude-sync push
+#   ccsync sync     -> pull (as above) then push
+#   ccsync version  -> this wrapper's version and claude-sync's
+#   anything else   -> passed through untouched (status, diff, conflicts, ...)
+#   --dry-run on pull/sync previews the pull and the deletions, and changes nothing.
+#   -h/--help on pull/sync shows claude-sync's pull help and runs nothing else.
+#
+# Applying deletions: claude-sync pull only downloads. A file the other machine deleted and pushed stays here,
+# and returns to the cloud as soon as it changes here or the sync state is reset. After each pull, ccsync moves
+# such a file to ~/.claude-sync/trash/<timestamp>/<same relative path> when all of these hold:
+#   - `claude-sync diff` lists it as "Local only" (it is not in the cloud),
+#   - its name holds no ".conflict.": the remote side of a conflict, written and recorded in state.json by the
+#     pull that just ran, passes every other test, and `claude-sync conflicts` finds it only by that mark,
+#   - its path stays inside ~/.claude and reaches the file through no symlink, so it leads where it appears to
+#     (claude-sync does not sync linked content, so such a path should never be listed; if it is, the file
+#     lives outside ~/.claude - a memory folder kept in a git repo, say - and must not be moved),
+#   - ~/.claude-sync/state.json records it with a hash (this machine synced it before, so it is not new here),
+#   - its SHA-256 equals that hash (it has no edits here that were never pushed).
+# A file that fails only the last test has edits here: it is kept and reported, and the next push uploads it
+# again. A conflict copy, a path that fails the path test and a file that cannot be hashed are kept and reported
+# with the reason. The next push drops the moved files from state.json (it finds them gone and deletes their
+# cloud keys, which are already absent). The list of moved files is written beside the trash folder, as
+# <timestamp>.moved.txt, so it can never overwrite a moved file.
+#
+# Nothing is moved when there is no state.json yet, when the cloud lists no synced file, when the pull reported
+# cloud keys this machine cannot map (unknown path token), when the pull ran with -q/--quiet (which hides that
+# report), or when diff fails or its output cannot be parsed. A dry run cannot see unmappable keys, so its
+# preview may list deletions that the real run then refuses.
+# Confirmation is asked for when the deletions are more than $CONFIRM_ABOVE files, or more than
+# $CONFIRM_SHARE_PERCENT% of the files diff counts as synced: a bucket that was partly emptied looks exactly like
+# the other machine deleting many files, and the share catches that even when the count alone is unremarkable.
+# Without a terminal to ask, nothing is moved.
+# To restore a moved file, copy it from the trash folder back to the same path under ~/.claude.
+#
+# Why the history rebuild on every pull: history.jsonl is synced as a single file and is last-writer-wins, so
+# a plain pull replaces this machine's prompt history with the other machine's copy and the /resume picker
+# goes short. The rebuild walks the local session files, merges their prompts back in, and keeps the previous
+# file as history.jsonl.bak. It only ever adds entries, and it runs after the deletions so removed sessions add
+# none.
+
+set -uo pipefail
+
+CCSYNC_VERSION='v1.17.2-patch1'
+CONFIRM_ABOVE=20
+CONFIRM_SHARE_PERCENT=25
+LIST_LIMIT=25
+CLAUDE_DIR="$HOME/.claude"
+SYNC_STATE_DIR="$HOME/.claude-sync"
+STATE_PATH="$SYNC_STATE_DIR/state.json"
+TRASH_ROOT="$SYNC_STATE_DIR/trash"
+
+BIN="$(command -v claude-sync 2>/dev/null || true)"
+if [ -z "$BIN" ]; then
+    printf 'ccsync: claude-sync not found on PATH\n' >&2
+    exit 1
+fi
+
+if [ -t 1 ]; then
+    DIM=$'\033[2m'; RED=$'\033[31m'; YELLOW=$'\033[33m'; CYAN=$'\033[36m'; OFF=$'\033[0m'
+else
+    DIM=''; RED=''; YELLOW=''; CYAN=''; OFF=''
+fi
+
+announce()  { printf '%s> claude-sync %s%s\n' "$DIM" "$*" "$OFF"; }
+note()      { printf '%sccsync: %s%s\n' "$DIM" "$*" "$OFF"; }
+warn()      { printf '%sccsync: %s%s\n' "$YELLOW" "$*" "$OFF" >&2; }
+fail()      { printf '%sccsync: %s%s\n' "$RED" "$*" "$OFF" >&2; }
+highlight() { printf '%sccsync: %s%s\n' "$CYAN" "$*" "$OFF"; }
+
+# claude-sync reads a bool flag's "=value" the way Go's strconv.ParseBool does; these are its true spellings.
+is_true_flag_value() {
+    case "$1" in
+        1|t|T|TRUE|true|True) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# Prints at most $LIST_LIMIT lines from the file given, indented, then a count of the rest.
+print_path_list() {
+    local listFile="$1" total
+    total=$(wc -l < "$listFile" | tr -d ' ')
+    sed -n "1,${LIST_LIMIT}p" "$listFile" | sed 's/^/    /'
+    if [ "$total" -gt "$LIST_LIMIT" ]; then
+        printf '    ... and %d more\n' "$((total - LIST_LIMIT))"
+    fi
+}
+
+# Parses `claude-sync diff` and sorts its "Local only" paths into DEL (deleted on the other machine, safe to
+# move), EDIT (changed here since the last sync, kept), NEW (never synced, kept), CONFLICT (the remote side of a
+# conflict, kept) and SKIP (kept, with a reason), after one SYNCED line carrying diff's synced count. Emits one
+# record per line; any problem emits a single ERR line instead, so a format change or an unreadable state file
+# never moves files.
+classify_local_only() {
+    local diffFile="$1"
+    python3 - "$diffFile" "$STATE_PATH" "$CLAUDE_DIR" <<'PYTHON'
+import sys, os, re, json, hashlib
+
+diff_file, state_path, claude_dir = sys.argv[1:4]
+
+def bail(message):
+    print("ERR " + message)
+    sys.exit(0)
+
+ansi = re.compile(r'\x1b\[[0-9;]*[A-Za-z]')
+try:
+    with open(diff_file, 'r', encoding='utf-8', errors='replace') as handle:
+        lines = [ansi.sub('', line).rstrip('\r') for line in handle.read().split('\n')]
+except OSError as error:
+    bail("could not read diff output: %s" % error)
+
+summary_re = re.compile(r'^Summary: (\d+) synced, (\d+) local only, (\d+) remote only, (\d+) modified$')
+header_re = re.compile(r'^Local only \(\d+ files\):$')
+entry_re = re.compile(r'^  \+ (.+) \([^()]+\)$')
+
+summary = None
+for line in lines:
+    found = summary_re.match(line)
+    if found:
+        summary = found
+if summary is None:
+    bail("diff printed no summary line")
+
+local_only = []
+in_section = False
+for line in lines:
+    if header_re.match(line):
+        in_section = True
+        continue
+    if not in_section:
+        continue
+    if line == '':
+        in_section = False
+        continue
+    entry = entry_re.match(line)
+    if entry is None:
+        bail("unexpected line in diff's Local only list: " + line)
+    local_only.append(entry.group(1))
+
+synced_count = int(summary.group(1))
+declared = int(summary.group(2))
+if declared != len(local_only):
+    bail("diff summary says %d local-only files but listed %d" % (declared, len(local_only)))
+
+try:
+    with open(state_path, 'r', encoding='utf-8') as handle:
+        state = json.load(handle)
+except (OSError, ValueError) as error:
+    bail("could not read state.json: %s" % error)
+
+synced_files = state.get('files')
+if not isinstance(synced_files, dict):
+    bail("state.json has no files map")
+
+print("SYNCED %d" % synced_count)
+
+claude_root = os.path.realpath(claude_dir)
+
+def sha256_of(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+def reached_through_symlink(relative_path):
+    parts = relative_path.split('/')
+    for depth in range(len(parts)):
+        if os.path.islink(os.path.join(claude_dir, *parts[:depth + 1])):
+            return True
+    return False
+
+for relative_path in local_only:
+    # claude-sync marks the remote side of a conflict the same way, in the file name, so this has to match it.
+    if '.conflict.' in os.path.basename(relative_path):
+        print("CONFLICT %s" % relative_path)
+        continue
+
+    full_path = os.path.join(claude_dir, relative_path)
+
+    # Never act on a path that leaves ~/.claude, however it got listed.
+    resolved = os.path.realpath(full_path)
+    if resolved != claude_root and not resolved.startswith(claude_root + os.sep):
+        print("SKIP %s|escapes ~/.claude" % relative_path)
+        continue
+    if reached_through_symlink(relative_path):
+        print("SKIP %s|reached through a symlink" % relative_path)
+        continue
+
+    recorded = synced_files.get(relative_path)
+    if recorded is None:
+        print("NEW %s" % relative_path)
+        continue
+    # diff listed it a moment ago; if it is gone or no longer a file, there is nothing left to move.
+    if not os.path.isfile(full_path):
+        continue
+    recorded_hash = recorded.get('hash') if isinstance(recorded, dict) else None
+    if not recorded_hash:
+        print("SKIP %s|no hash recorded in state.json" % relative_path)
+        continue
+    try:
+        local_hash = sha256_of(full_path)
+    except OSError as error:
+        print("SKIP %s|could not hash it: %s" % (relative_path, error))
+        continue
+    if local_hash.lower() == str(recorded_hash).lower():
+        print("DEL %s" % relative_path)
+    else:
+        print("EDIT %s" % relative_path)
+PYTHON
+}
+
+# Removes directories left empty by a move, walking up from the one given; never touches the first two levels
+# under ~/.claude (e.g. projects/ and projects/<project key>/).
+prune_empty_parents() {
+    local directory="$1" relative depth entries errorText
+    while :; do
+        case "$directory" in
+            "$CLAUDE_DIR"/*) ;;
+            *) return ;;
+        esac
+        relative="${directory#"$CLAUDE_DIR"/}"
+        depth=$(printf '%s' "$relative" | awk -F/ '{print NF}')
+        [ "$depth" -ge 3 ] || return
+        if ! entries=$(ls -A "$directory" 2>&1); then
+            warn "could not list $directory to see whether it is empty: $entries"
+            return
+        fi
+        [ -z "$entries" ] || return
+        if ! errorText=$(rmdir "$directory" 2>&1); then
+            warn "could not remove empty folder $directory: $errorText"
+            return
+        fi
+        directory="$(dirname "$directory")"
+    done
+}
+
+# Moves each listed file to the same relative path under the trash folder, then writes the list of what moved
+# beside that folder. Prints the path of a file holding that list.
+move_to_trash() {
+    local listFile="$1" trashDir="$2" relative source destination movedList errorText
+    movedList="$WORK_DIR/moved.txt"
+    : > "$movedList"
+    while IFS= read -r relative; do
+        [ -n "$relative" ] || continue
+        source="$CLAUDE_DIR/$relative"
+        destination="$trashDir/$relative"
+        if ! errorText=$(mkdir -p "$(dirname "$destination")" 2>&1); then
+            warn "could not create the trash folder for $relative: $errorText"
+            continue
+        fi
+        if ! errorText=$(mv "$source" "$destination" 2>&1); then
+            warn "could not move $relative to the trash: $errorText"
+            continue
+        fi
+        printf '%s\n' "$relative" >> "$movedList"
+        prune_empty_parents "$(dirname "$source")"
+    done < "$listFile"
+    if [ -s "$movedList" ]; then
+        if ! errorText=$(cp "$movedList" "$trashDir.moved.txt" 2>&1); then
+            warn "could not write the list of moved files to $trashDir.moved.txt: $errorText"
+        fi
+    fi
+    printf '%s' "$movedList"
+}
+
+# Applies the other machine's deletions to this machine after a pull (see the header). Never exits non-zero.
+apply_deletions() {
+    local isDryRun="$1"
+    local diffFile="$WORK_DIR/diff.txt" planFile="$WORK_DIR/plan.txt"
+    local delFile="$WORK_DIR/del.txt" editFile="$WORK_DIR/edit.txt" skipFile="$WORK_DIR/skip.txt"
+    local conflictFile="$WORK_DIR/conflict.txt" skipShownFile="$WORK_DIR/skip-shown.txt"
+    local diffExitCode syncedCount delCount editCount skipCount conflictCount errLine
+    local needsConfirmation sharePercent trashDir movedList movedCount answer errorText
+
+    "$BIN" diff > "$diffFile" 2>&1
+    diffExitCode=$?
+    if [ "$diffExitCode" -ne 0 ]; then
+        warn "deletions not applied: claude-sync diff failed (exit $diffExitCode): $(tr '\n' '|' < "$diffFile")"
+        return 0
+    fi
+
+    if ! classify_local_only "$diffFile" > "$planFile" 2>"$WORK_DIR/plan.err"; then
+        warn "deletions not applied: could not classify the diff: $(tr '\n' ' ' < "$WORK_DIR/plan.err")"
+        return 0
+    fi
+
+    errLine=$(sed -n 's/^ERR //p' "$planFile" | head -1)
+    if [ -n "$errLine" ]; then
+        warn "deletions not applied: $errLine"
+        return 0
+    fi
+
+    syncedCount=$(sed -n 's/^SYNCED //p' "$planFile" | head -1)
+    if [ -z "$syncedCount" ]; then
+        warn "deletions not applied: the plan reported no synced count"
+        return 0
+    fi
+    if [ "$syncedCount" -eq 0 ]; then
+        warn "deletions not applied: the cloud lists no synced file, which looks like an empty or unreachable bucket"
+        return 0
+    fi
+
+    sed -n 's/^DEL //p'  "$planFile" > "$delFile"
+    sed -n 's/^EDIT //p' "$planFile" > "$editFile"
+    sed -n 's/^SKIP //p' "$planFile" > "$skipFile"
+    sed -n 's/^CONFLICT //p' "$planFile" > "$conflictFile"
+    delCount=$(wc -l < "$delFile" | tr -d ' ')
+    editCount=$(wc -l < "$editFile" | tr -d ' ')
+    skipCount=$(wc -l < "$skipFile" | tr -d ' ')
+    conflictCount=$(wc -l < "$conflictFile" | tr -d ' ')
+
+    if [ "$conflictCount" -gt 0 ]; then
+        highlight "left $conflictCount conflict copy(ies) alone; run claude-sync conflicts to resolve them:"
+        print_path_list "$conflictFile"
+    fi
+
+    if [ "$skipCount" -gt 0 ]; then
+        warn "skipped $skipCount path(s) that must not be moved:"
+        sed 's/|/  -- /' "$skipFile" > "$skipShownFile"
+        print_path_list "$skipShownFile" >&2
+    fi
+
+    if [ "$editCount" -gt 0 ]; then
+        highlight "kept $editCount file(s) the other machine deleted but this machine has changed since; the next push uploads them again:"
+        print_path_list "$editFile"
+    fi
+
+    if [ "$delCount" -eq 0 ]; then
+        note "no deletions from the other machine to apply"
+        return 0
+    fi
+
+    # Ask when there are many, or when the share of the synced files is large enough to look like data loss
+    # upstream rather than deliberate deletes. Integer arithmetic, so the share test is exact.
+    needsConfirmation='no'
+    if [ "$delCount" -gt "$CONFIRM_ABOVE" ] || [ $((delCount * 100)) -gt $((syncedCount * CONFIRM_SHARE_PERCENT)) ]; then
+        needsConfirmation='yes'
+    fi
+    sharePercent=$(awk -v deleted="$delCount" -v synced="$syncedCount" 'BEGIN { printf "%.1f", 100 * deleted / synced }')
+
+    if [ "$isDryRun" = 'yes' ]; then
+        if [ "$needsConfirmation" = 'yes' ]; then
+            highlight "would move $delCount file(s) deleted on the other machine to the trash - $sharePercent% of the $syncedCount synced file(s) - and would ask first:"
+        else
+            highlight "would move $delCount file(s) deleted on the other machine to the trash - $sharePercent% of the $syncedCount synced file(s):"
+        fi
+        print_path_list "$delFile"
+        note "a dry run cannot see cloud keys this machine cannot map (unknown path token); if the real pull reports any, it moves nothing"
+        return 0
+    fi
+
+    if [ "$needsConfirmation" = 'yes' ]; then
+        highlight "$delCount of the $syncedCount synced file(s) ($sharePercent%) are gone from the cloud:"
+        print_path_list "$delFile"
+        if [ ! -t 0 ]; then
+            warn "needs confirmation and there is no terminal to ask; nothing moved. Run ccsync pull by hand."
+            return 0
+        fi
+        printf 'Move them to the trash? [y/N] '
+        IFS= read -r answer || answer=''
+        case "$answer" in
+            y|Y|yes|YES) ;;
+            *) note "nothing moved"; return 0 ;;
+        esac
+    fi
+
+    trashDir="$TRASH_ROOT/$(date +%Y%m%d-%H%M%S)"
+    if ! errorText=$(mkdir -p "$trashDir" 2>&1); then
+        warn "deletions not applied: could not create $trashDir: $errorText"
+        return 0
+    fi
+    movedList=$(move_to_trash "$delFile" "$trashDir")
+    movedCount=$(wc -l < "$movedList" | tr -d ' ')
+    highlight "moved $movedCount file(s) deleted on the other machine to $trashDir"
+    print_path_list "$movedList"
+    return 0
+}
+
+if [ $# -eq 0 ]; then
+    "$BIN" --help
+    exit $?
+fi
+
+verb="$1"
+shift
+
+case "$verb" in
+    version|--version|-v)
+        printf 'ccsync %s\n' "$CCSYNC_VERSION"
+        "$BIN" --version
+        exit $?
+        ;;
+    pull|sync)
+        isDryRun='no'
+        isQuiet='no'
+        isHelp='no'
+        pullArgs=(pull)
+        # A repeated flag takes its last value, as it does in claude-sync.
+        for argument in "$@"; do
+            case "$argument" in
+                --dry-run) isDryRun='yes' ;;
+                --dry-run=*) if is_true_flag_value "${argument#*=}"; then isDryRun='yes'; else isDryRun='no'; fi ;;
+                -q|--quiet) isQuiet='yes' ;;
+                -q=*|--quiet=*) if is_true_flag_value "${argument#*=}"; then isQuiet='yes'; else isQuiet='no'; fi ;;
+                -h|--help) isHelp='yes' ;;
+            esac
+            case "$argument" in
+                --rebuild-history|--rebuild-history=*) ;;   # run as its own step below, after the deletions
+                *) pullArgs+=("$argument") ;;
+            esac
+        done
+
+        if [ "$isHelp" = 'yes' ]; then
+            exec "$BIN" "${pullArgs[@]}"
+        fi
+
+        if ! WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/ccsync.XXXXXX")" || [ ! -d "$WORK_DIR" ]; then
+            fail "could not create a temporary folder under ${TMPDIR:-/tmp}"
+            exit 1
+        fi
+        trap 'rm -rf "$WORK_DIR"' EXIT
+
+        hasSyncState='no'
+        [ -f "$STATE_PATH" ] && hasSyncState='yes'
+
+        announce "${pullArgs[@]}"
+        pullOutput="$WORK_DIR/pull.txt"
+        if [ "$hasSyncState" = 'yes' ]; then
+            "$BIN" "${pullArgs[@]}" 2>&1 | tee "$pullOutput"
+            pullExitCode=${PIPESTATUS[0]}
+        else
+            "$BIN" "${pullArgs[@]}"
+            pullExitCode=$?
+            : > "$pullOutput"
+        fi
+        if [ "$pullExitCode" -ne 0 ]; then
+            if [ "$verb" = 'sync' ]; then
+                fail "pull failed (exit $pullExitCode), skipping push"
+            else
+                fail "pull failed (exit $pullExitCode)"
+            fi
+            exit "$pullExitCode"
+        fi
+
+        if [ "$hasSyncState" != 'yes' ]; then
+            note "no sync state yet, so there are no deletions to apply"
+        elif [ "$isQuiet" = 'yes' ]; then
+            warn "deletions not applied: -q/--quiet hides the pull's report of cloud keys this machine cannot map; run without it to apply them"
+        else
+            unmappedCount=$(grep -c 'unknown path token' "$pullOutput" || true)
+            if [ "${unmappedCount:-0}" -gt 0 ]; then
+                warn "deletions not applied: the pull reported $unmappedCount cloud key(s) this machine cannot map (unknown path token); add the path_map entry first"
+            else
+                apply_deletions "$isDryRun"
+            fi
+        fi
+
+        if [ "$isDryRun" = 'yes' ]; then
+            exit 0
+        fi
+
+        announce rebuild-history
+        "$BIN" rebuild-history
+        rebuildExitCode=$?
+        if [ "$rebuildExitCode" -ne 0 ]; then
+            if [ "$verb" = 'sync' ]; then
+                fail "rebuild-history failed (exit $rebuildExitCode), skipping push"
+            else
+                fail "rebuild-history failed (exit $rebuildExitCode)"
+            fi
+            exit "$rebuildExitCode"
+        fi
+
+        [ "$verb" = 'pull' ] && exit 0
+
+        announce push
+        "$BIN" push
+        exit $?
+        ;;
+    *)
+        announce "$verb" "$@"
+        exec "$BIN" "$verb" "$@"
+        ;;
+esac

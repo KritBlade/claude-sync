@@ -1,0 +1,8 @@
+# The bash copy of ccsync and its test harness run under bash on macOS and Linux, so they keep LF line
+# endings on every checkout, Windows included.
+ccsync/ccsync text eol=lf
+ccsync/tests/*.sh text eol=lf
+ccsync/tests/fake-bash/claude-sync text eol=lf
+# cmd.exe needs CRLF; the PowerShell copy keeps the same endings as its launcher.
+ccsync/**/*.cmd text eol=crlf
+ccsync/*.ps1 text eol=crlf
