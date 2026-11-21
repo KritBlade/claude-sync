@@ -13,6 +13,8 @@ bin/tests/
 
 # ccsync wrapper scripts: installed by hand, see ccsync/README.md
 ccsync/
+# Fork maintenance notes
+Upgrade-local.md
 
 # Development
 .git/

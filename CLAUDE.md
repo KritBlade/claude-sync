@@ -2,6 +2,8 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+**This checkout is a fork** (KritBlade/claude-sync of tawanorg/claude-sync). Its `main` is the latest upstream release with the fork's own commits and the `ccsync/` wrapper on top. Before any `git pull`, rebase, upgrade to a new upstream release or re-clone, read [Upgrade-local.md](Upgrade-local.md).
+
 ## Repository Purpose
 
 `claude-sync` is a Go CLI that syncs `~/.claude/` (Claude Code state: sessions, agents, skills, plugins, settings, history, global `CLAUDE.md`) across devices via encrypted cloud storage (Cloudflare R2 / AWS S3 / GCS). Files are gzip-compressed, then age-encrypted before upload. The canonical binary is distributed as pre-compiled platform-specific npm packages; a tiny Node wrapper at `bin/claude-sync.js` dispatches to the right binary.
