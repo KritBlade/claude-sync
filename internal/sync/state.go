@@ -350,8 +350,12 @@ func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(strin
 					}
 					return nil
 				}
-				// Skip symlinks
-				if fi.Mode()&os.ModeSymlink != 0 {
+				// Only regular files are synced. The walk reports entries
+				// unresolved, so a symlink is skipped, and so is a Windows
+				// junction: Go reports one as an irregular file, not a symlink
+				// or a directory, and reading it as a file fails with
+				// "Incorrect function". Pipes and devices are skipped too.
+				if !fi.Mode().IsRegular() {
 					return nil
 				}
 				// Skip excluded files
@@ -369,8 +373,10 @@ func GetLocalFiles(claudeDir string, syncPaths []string, excludeFn ...func(strin
 				return nil, fmt.Errorf("failed to walk %s: %w", syncPath, err)
 			}
 		} else {
-			// Skip symlinks
-			if info.Mode()&os.ModeSymlink != 0 {
+			// info comes from os.Stat, which follows a symlink, so a top-level
+			// sync path that links to a regular file is synced with its
+			// target's content. Anything that is not a regular file is skipped.
+			if !info.Mode().IsRegular() {
 				continue
 			}
 			// Skip excluded files
