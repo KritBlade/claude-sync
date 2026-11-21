@@ -11,7 +11,8 @@ antigravity-sync status          # what pull and push would do
 antigravity-sync version
 ```
 
-`ccsync` runs it after claude-sync on `pull`, `push` and `sync`, when it is on PATH.
+`ccsync` runs it after claude-sync on `pull`, `push` and `sync`, when it is on PATH, and always runs its pull with
+`--stop-antigravity`.
 
 ## What it syncs
 

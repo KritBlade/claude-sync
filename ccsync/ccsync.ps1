@@ -1,4 +1,4 @@
-# ccsync v1.17.2-patch2 - wrapper around claude-sync and antigravity-sync, which sync ~/.claude and Antigravity's
+# ccsync v1.17.2-patch3 - wrapper around claude-sync and antigravity-sync, which sync ~/.claude and Antigravity's
 # conversations through the same encrypted cloud storage
 #
 #   ccsync pull     -> claude-sync pull, then apply the other machine's deletions, then claude-sync rebuild-history,
@@ -8,14 +8,14 @@
 #   ccsync version  -> this wrapper's version, claude-sync's and antigravity-sync's
 #   anything else   -> passed through to claude-sync untouched (status, diff, conflicts, ...)
 #   --dry-run on pull/sync previews both pulls and the deletions, and changes nothing.
-#   --stop-antigravity on pull/sync lets antigravity-sync stop a running agy hub first (see below).
 #   -h/--help on pull/sync shows claude-sync's pull help and runs nothing else.
 #
-# Antigravity: the antigravity-sync steps run only when antigravity-sync is on PATH. Its pull refuses while
-# Antigravity is running, because it replaces conversation files Antigravity holds open; --stop-antigravity stops
-# the agy hub an editor extension runs (the extension starts it again when its panel is next used), and the
-# Antigravity app has to be closed by hand. A failed antigravity-sync step does not stop the Claude steps: ccsync
-# carries on and exits with that step's code at the end.
+# Antigravity: the antigravity-sync steps run only when antigravity-sync is on PATH. Its pull replaces
+# conversation files Antigravity holds open, so ccsync runs it with --stop-antigravity: that stops the agy hub an
+# editor extension runs, and with it any Antigravity task in progress (the extension starts the hub again when its
+# panel is next used). The pull still refuses while the Antigravity app runs, which has to be closed by hand. A
+# failed antigravity-sync step does not stop the Claude steps: ccsync carries on and exits with that step's code
+# at the end.
 #
 # Applying deletions: claude-sync pull only downloads. A file the other machine deleted and pushed stays here,
 # and returns to the cloud as soon as it changes here or the sync state is reset. After each pull, ccsync moves
@@ -50,7 +50,7 @@
 # file as history.jsonl.bak. It only ever adds entries, and it runs after the deletions so removed sessions add
 # none.
 
-$CcsyncVersion = 'v1.17.2-patch2'
+$CcsyncVersion = 'v1.17.2-patch3'
 $ConfirmAbove = 20
 $ConfirmSharePercent = 25
 # claude-sync writes the remote side of a conflict to "<path>.conflict.<timestamp>" and finds those files again
@@ -412,7 +412,6 @@ if ($verb -eq 'pull' -or $verb -eq 'sync') {
     $isDryRun = $false
     $isQuiet = $false
     $isHelp = $false
-    $shouldStopAntigravity = $false
     $pullArgumentList = New-Object System.Collections.Generic.List[string]
     $pullArgumentList.Add('pull')
     # A repeated flag takes its last value, as it does in claude-sync.
@@ -427,10 +426,6 @@ if ($verb -eq 'pull' -or $verb -eq 'sync') {
             $isQuiet = Test-TrueFlagValue $argument.Substring($argument.IndexOf('=') + 1)
         } elseif ($argument -ceq '-h' -or $argument -ceq '--help') {
             $isHelp = $true
-        } elseif ($argument -ceq '--stop-antigravity') {
-            # ccsync's own flag, for antigravity-sync; claude-sync does not know it.
-            $shouldStopAntigravity = $true
-            continue
         }
         # --rebuild-history runs as its own step below, after the deletions.
         if ($argument -ceq '--rebuild-history' -or $argument -clike '--rebuild-history=*') { continue }
@@ -480,9 +475,7 @@ if ($verb -eq 'pull' -or $verb -eq 'sync') {
         Write-Host "ccsync: rebuild-history failed (exit $LASTEXITCODE)$(if ($verb -eq 'sync') { ', skipping push' })" -ForegroundColor Red
         exit $LASTEXITCODE
     }
-    $antigravityPullArguments = @('pull')
-    if ($shouldStopAntigravity) { $antigravityPullArguments += '--stop-antigravity' }
-    Invoke-AntigravitySync -Arguments $antigravityPullArguments
+    Invoke-AntigravitySync -Arguments @('pull', '--stop-antigravity')
     if ($verb -eq 'pull') { exit $script:AntigravityExitCode }
 
     Write-Host "> claude-sync push" -ForegroundColor DarkGray

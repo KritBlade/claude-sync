@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# ccsync v1.17.2-patch2 - wrapper around claude-sync and antigravity-sync, which sync ~/.claude and Antigravity's
+# ccsync v1.17.2-patch3 - wrapper around claude-sync and antigravity-sync, which sync ~/.claude and Antigravity's
 # conversations through the same encrypted cloud storage
 #
 #   ccsync pull     -> claude-sync pull, then apply the other machine's deletions, then claude-sync rebuild-history,
@@ -9,14 +9,14 @@
 #   ccsync version  -> this wrapper's version, claude-sync's and antigravity-sync's
 #   anything else   -> passed through to claude-sync untouched (status, diff, conflicts, ...)
 #   --dry-run on pull/sync previews both pulls and the deletions, and changes nothing.
-#   --stop-antigravity on pull/sync lets antigravity-sync stop a running agy hub first (see below).
 #   -h/--help on pull/sync shows claude-sync's pull help and runs nothing else.
 #
-# Antigravity: the antigravity-sync steps run only when antigravity-sync is on PATH. Its pull refuses while
-# Antigravity is running, because it replaces conversation files Antigravity holds open; --stop-antigravity stops
-# the agy hub an editor extension runs (the extension starts it again when its panel is next used), and the
-# Antigravity app has to be closed by hand. A failed antigravity-sync step does not stop the Claude steps: ccsync
-# carries on and exits with that step's code at the end.
+# Antigravity: the antigravity-sync steps run only when antigravity-sync is on PATH. Its pull replaces
+# conversation files Antigravity holds open, so ccsync runs it with --stop-antigravity: that stops the agy hub an
+# editor extension runs, and with it any Antigravity task in progress (the extension starts the hub again when its
+# panel is next used). The pull still refuses while the Antigravity app runs, which has to be closed by hand. A
+# failed antigravity-sync step does not stop the Claude steps: ccsync carries on and exits with that step's code
+# at the end.
 #
 # Applying deletions: claude-sync pull only downloads. A file the other machine deleted and pushed stays here,
 # and returns to the cloud as soon as it changes here or the sync state is reset. After each pull, ccsync moves
@@ -53,7 +53,7 @@
 
 set -uo pipefail
 
-CCSYNC_VERSION='v1.17.2-patch2'
+CCSYNC_VERSION='v1.17.2-patch3'
 CONFIRM_ABOVE=20
 CONFIRM_SHARE_PERCENT=25
 LIST_LIMIT=25
@@ -448,7 +448,6 @@ case "$verb" in
         isDryRun='no'
         isQuiet='no'
         isHelp='no'
-        shouldStopAntigravity='no'
         pullArgs=(pull)
         # A repeated flag takes its last value, as it does in claude-sync.
         for argument in "$@"; do
@@ -458,11 +457,9 @@ case "$verb" in
                 -q|--quiet) isQuiet='yes' ;;
                 -q=*|--quiet=*) if is_true_flag_value "${argument#*=}"; then isQuiet='yes'; else isQuiet='no'; fi ;;
                 -h|--help) isHelp='yes' ;;
-                --stop-antigravity) shouldStopAntigravity='yes' ;;
             esac
             case "$argument" in
                 --rebuild-history|--rebuild-history=*) ;;   # run as its own step below, after the deletions
-                --stop-antigravity) ;;                      # ccsync's own flag, for antigravity-sync
                 *) pullArgs+=("$argument") ;;
             esac
         done
@@ -529,11 +526,7 @@ case "$verb" in
             exit "$rebuildExitCode"
         fi
 
-        antigravityPullArgs=(pull)
-        if [ "$shouldStopAntigravity" = 'yes' ]; then
-            antigravityPullArgs+=(--stop-antigravity)
-        fi
-        run_antigravity_sync "${antigravityPullArgs[@]}"
+        run_antigravity_sync pull --stop-antigravity
         if [ "$verb" = 'pull' ]; then
             exit "$antigravityExitCode"
         fi

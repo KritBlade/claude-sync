@@ -8,9 +8,10 @@ A wrapper around `claude-sync` and `antigravity-sync` for keeping two or more ma
 - `ccsync sync` runs the pull steps, then the push steps.
 - Every other command passes straight through to `claude-sync`.
 
-The Antigravity steps run only when `antigravity-sync` is on PATH (see `antigravity-sync/README.md`). Its pull
-refuses while Antigravity is running; `--stop-antigravity` on `ccsync pull`/`sync` lets it stop the agy hub an
-editor extension runs. A failed Antigravity step does not stop the Claude steps; ccsync exits with its code at
+The Antigravity steps run only when `antigravity-sync` is on PATH (see `antigravity-sync/README.md`). ccsync runs
+its pull with `--stop-antigravity`, which stops the agy hub an editor extension runs, and with it any Antigravity
+task in progress; the extension starts the hub again when its panel is next used. The pull still refuses while
+the Antigravity app runs. A failed Antigravity step does not stop the Claude steps; ccsync exits with its code at
 the end. Which Claude files are moved, and when ccsync asks first, is described in the header of each script.
 
 ## Files

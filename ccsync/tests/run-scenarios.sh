@@ -146,7 +146,7 @@ for IMPL in $IMPLEMENTATIONS; do
     assert_output_has 'no hash recorded in state.json'
     assert_output_has 'left 1 conflict copy'
     assert_output_has 'kept 1 file(s) the other machine deleted'
-    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull'
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull --stop-antigravity'
     assert_exit_code 0
 
     SCENARIO=prune
@@ -186,14 +186,14 @@ for IMPL in $IMPLEMENTATIONS; do
     new_fixture 100 'projects/p1/s1/deleted.jsonl|gone elsewhere|match'
     run_ccsync pull --dry-run=false
     assert_missing "$HOME_DIR/.claude/projects/p1/s1/deleted.jsonl"
-    assert_calls 'pull --dry-run=false;diff;rebuild-history;antigravity-sync pull'
+    assert_calls 'pull --dry-run=false;diff;rebuild-history;antigravity-sync pull --stop-antigravity'
 
     SCENARIO=quiet
     new_fixture 100 'projects/p1/s1/deleted.jsonl|gone elsewhere|match'
     run_ccsync sync -q
     assert_exists "$HOME_DIR/.claude/projects/p1/s1/deleted.jsonl"
     assert_output_has 'deletions not applied: -q/--quiet'
-    assert_calls 'pull -q;rebuild-history;antigravity-sync pull;push;antigravity-sync push'
+    assert_calls 'pull -q;rebuild-history;antigravity-sync pull --stop-antigravity;push;antigravity-sync push'
 
     SCENARIO=unknown-token
     new_fixture 100 'projects/p1/s1/deleted.jsonl|gone elsewhere|match'
@@ -211,7 +211,7 @@ for IMPL in $IMPLEMENTATIONS; do
     SCENARIO=rebuild-history-flag
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
     run_ccsync pull --rebuild-history=true
-    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull'
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull --stop-antigravity'
 
     SCENARIO=push
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
@@ -219,16 +219,11 @@ for IMPL in $IMPLEMENTATIONS; do
     assert_calls 'push --include-mcp;antigravity-sync push'
     assert_exit_code 0
 
-    SCENARIO=stop-antigravity
-    new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
-    run_ccsync pull --stop-antigravity
-    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull --stop-antigravity'
-
     SCENARIO=antigravity-failure
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
     printf '3' > "$FAKE_DIR/antigravity-exit-code"
     run_ccsync sync
-    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull;push;antigravity-sync push'
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull --stop-antigravity;push;antigravity-sync push'
     assert_output_has 'antigravity-sync pull failed (exit 3)'
     assert_exit_code 3
 
@@ -236,7 +231,7 @@ for IMPL in $IMPLEMENTATIONS; do
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
     run_ccsync version
     assert_calls '--version;antigravity-sync version'
-    assert_output_has 'ccsync v1.17.2-patch2'
+    assert_output_has 'ccsync v1.17.2-patch3'
 
     SCENARIO=passthrough
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
