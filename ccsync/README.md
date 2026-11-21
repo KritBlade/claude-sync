@@ -1,13 +1,17 @@
 # ccsync
 
-A wrapper around `claude-sync` for keeping two or more machines in step.
+A wrapper around `claude-sync` and `antigravity-sync` for keeping two or more machines in step.
 
 - `ccsync pull` runs `claude-sync pull`, moves the files the other machine deleted to `~/.claude-sync/trash/`,
-  then runs `claude-sync rebuild-history`.
-- `ccsync sync` does the same, then runs `claude-sync push`.
+  runs `claude-sync rebuild-history`, then runs `antigravity-sync pull`.
+- `ccsync push` runs `claude-sync push`, then `antigravity-sync push`.
+- `ccsync sync` runs the pull steps, then the push steps.
 - Every other command passes straight through to `claude-sync`.
 
-Which files are moved, and when ccsync asks first, is described in the header of each script.
+The Antigravity steps run only when `antigravity-sync` is on PATH (see `antigravity-sync/README.md`). Its pull
+refuses while Antigravity is running; `--stop-antigravity` on `ccsync pull`/`sync` lets it stop the agy hub an
+editor extension runs. A failed Antigravity step does not stop the Claude steps; ccsync exits with its code at
+the end. Which Claude files are moved, and when ccsync asks first, is described in the header of each script.
 
 ## Files
 
@@ -18,7 +22,7 @@ The two copies implement the same behaviour and carry the same version, so chang
 
 ## Install
 
-`claude-sync` must already be on PATH.
+`claude-sync` must already be on PATH; put `antigravity-sync` on PATH too to sync Antigravity.
 
 - macOS / Linux: copy `ccsync` into a folder on PATH, such as `~/.local/bin`, and make it executable
   (`chmod +x`).
@@ -30,5 +34,5 @@ The two copies implement the same behaviour and carry the same version, so chang
 bash ccsync/tests/run-scenarios.sh
 ```
 
-This runs both copies through the same scenarios against a fake `claude-sync` and a throwaway home folder. The
-PowerShell copy runs only on Windows, under Git Bash.
+This runs both copies through the same scenarios against fake `claude-sync` and `antigravity-sync` programs and
+a throwaway home folder. The PowerShell copy runs only on Windows, under Git Bash.

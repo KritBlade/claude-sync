@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Fake antigravity-sync for the ccsync harness: logs its arguments, and exits with the code in
+# $FAKE_DIR/antigravity-exit-code when that file exists.
+printf 'antigravity-sync %s\n' "$*" >> "$FAKE_DIR/calls.log"
+if [ -f "$FAKE_DIR/antigravity-exit-code" ]; then
+    exit "$(cat "$FAKE_DIR/antigravity-exit-code")"
+fi
+exit 0

@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
-# ccsync v1.17.2-patch1 - wrapper around claude-sync, which syncs ~/.claude through encrypted cloud storage
+# ccsync v1.17.2-patch2 - wrapper around claude-sync and antigravity-sync, which sync ~/.claude and Antigravity's
+# conversations through the same encrypted cloud storage
 #
-#   ccsync pull     -> claude-sync pull, then apply the other machine's deletions, then claude-sync rebuild-history
-#   ccsync push     -> claude-sync push
-#   ccsync sync     -> pull (as above) then push
-#   ccsync version  -> this wrapper's version and claude-sync's
-#   anything else   -> passed through untouched (status, diff, conflicts, ...)
-#   --dry-run on pull/sync previews the pull and the deletions, and changes nothing.
+#   ccsync pull     -> claude-sync pull, then apply the other machine's deletions, then claude-sync rebuild-history,
+#                      then antigravity-sync pull
+#   ccsync push     -> claude-sync push, then antigravity-sync push
+#   ccsync sync     -> pull (as above) then push (as above)
+#   ccsync version  -> this wrapper's version, claude-sync's and antigravity-sync's
+#   anything else   -> passed through to claude-sync untouched (status, diff, conflicts, ...)
+#   --dry-run on pull/sync previews both pulls and the deletions, and changes nothing.
+#   --stop-antigravity on pull/sync lets antigravity-sync stop a running agy hub first (see below).
 #   -h/--help on pull/sync shows claude-sync's pull help and runs nothing else.
+#
+# Antigravity: the antigravity-sync steps run only when antigravity-sync is on PATH. Its pull refuses while
+# Antigravity is running, because it replaces conversation files Antigravity holds open; --stop-antigravity stops
+# the agy hub an editor extension runs (the extension starts it again when its panel is next used), and the
+# Antigravity app has to be closed by hand. A failed antigravity-sync step does not stop the Claude steps: ccsync
+# carries on and exits with that step's code at the end.
 #
 # Applying deletions: claude-sync pull only downloads. A file the other machine deleted and pushed stays here,
 # and returns to the cloud as soon as it changes here or the sync state is reset. After each pull, ccsync moves
@@ -44,7 +53,7 @@
 
 set -uo pipefail
 
-CCSYNC_VERSION='v1.17.2-patch1'
+CCSYNC_VERSION='v1.17.2-patch2'
 CONFIRM_ABOVE=20
 CONFIRM_SHARE_PERCENT=25
 LIST_LIMIT=25
@@ -70,6 +79,33 @@ note()      { printf '%sccsync: %s%s\n' "$DIM" "$*" "$OFF"; }
 warn()      { printf '%sccsync: %s%s\n' "$YELLOW" "$*" "$OFF" >&2; }
 fail()      { printf '%sccsync: %s%s\n' "$RED" "$*" "$OFF" >&2; }
 highlight() { printf '%sccsync: %s%s\n' "$CYAN" "$*" "$OFF"; }
+
+ANTIGRAVITY_SYNC_BIN="$(command -v antigravity-sync 2>/dev/null || true)"
+antigravityExitCode=0
+isAntigravityMissingReported='no'
+
+# Runs antigravity-sync with the arguments given, when it is installed. A failure is reported and its exit code
+# kept in antigravityExitCode (the first one wins); the caller carries on with the Claude steps.
+run_antigravity_sync() {
+    local exitCode
+    if [ -z "$ANTIGRAVITY_SYNC_BIN" ]; then
+        if [ "$isAntigravityMissingReported" = 'no' ]; then
+            note "antigravity-sync not found on PATH; Antigravity conversations not synced"
+            isAntigravityMissingReported='yes'
+        fi
+        return 0
+    fi
+    printf '%s> antigravity-sync %s%s\n' "$DIM" "$*" "$OFF"
+    "$ANTIGRAVITY_SYNC_BIN" "$@"
+    exitCode=$?
+    if [ "$exitCode" -ne 0 ]; then
+        fail "antigravity-sync $1 failed (exit $exitCode)"
+        if [ "$antigravityExitCode" -eq 0 ]; then
+            antigravityExitCode=$exitCode
+        fi
+    fi
+    return 0
+}
 
 # claude-sync reads a bool flag's "=value" the way Go's strconv.ParseBool does; these are its true spellings.
 is_true_flag_value() {
@@ -392,12 +428,27 @@ case "$verb" in
     version|--version|-v)
         printf 'ccsync %s\n' "$CCSYNC_VERSION"
         "$BIN" --version
-        exit $?
+        versionExitCode=$?
+        if [ -n "$ANTIGRAVITY_SYNC_BIN" ]; then
+            "$ANTIGRAVITY_SYNC_BIN" version
+        fi
+        exit "$versionExitCode"
+        ;;
+    push)
+        announce push "$@"
+        "$BIN" push "$@"
+        pushExitCode=$?
+        run_antigravity_sync push
+        if [ "$pushExitCode" -ne 0 ]; then
+            exit "$pushExitCode"
+        fi
+        exit "$antigravityExitCode"
         ;;
     pull|sync)
         isDryRun='no'
         isQuiet='no'
         isHelp='no'
+        shouldStopAntigravity='no'
         pullArgs=(pull)
         # A repeated flag takes its last value, as it does in claude-sync.
         for argument in "$@"; do
@@ -407,9 +458,11 @@ case "$verb" in
                 -q|--quiet) isQuiet='yes' ;;
                 -q=*|--quiet=*) if is_true_flag_value "${argument#*=}"; then isQuiet='yes'; else isQuiet='no'; fi ;;
                 -h|--help) isHelp='yes' ;;
+                --stop-antigravity) shouldStopAntigravity='yes' ;;
             esac
             case "$argument" in
                 --rebuild-history|--rebuild-history=*) ;;   # run as its own step below, after the deletions
+                --stop-antigravity) ;;                      # ccsync's own flag, for antigravity-sync
                 *) pullArgs+=("$argument") ;;
             esac
         done
@@ -460,7 +513,8 @@ case "$verb" in
         fi
 
         if [ "$isDryRun" = 'yes' ]; then
-            exit 0
+            run_antigravity_sync pull --dry-run
+            exit "$antigravityExitCode"
         fi
 
         announce rebuild-history
@@ -475,11 +529,23 @@ case "$verb" in
             exit "$rebuildExitCode"
         fi
 
-        [ "$verb" = 'pull' ] && exit 0
+        antigravityPullArgs=(pull)
+        if [ "$shouldStopAntigravity" = 'yes' ]; then
+            antigravityPullArgs+=(--stop-antigravity)
+        fi
+        run_antigravity_sync "${antigravityPullArgs[@]}"
+        if [ "$verb" = 'pull' ]; then
+            exit "$antigravityExitCode"
+        fi
 
         announce push
         "$BIN" push
-        exit $?
+        pushExitCode=$?
+        run_antigravity_sync push
+        if [ "$pushExitCode" -ne 0 ]; then
+            exit "$pushExitCode"
+        fi
+        exit "$antigravityExitCode"
         ;;
     *)
         announce "$verb" "$@"

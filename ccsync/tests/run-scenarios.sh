@@ -36,6 +36,7 @@ assert_calls() {
     actual="$(tr -d '\r' < "$FAKE_DIR/calls.log" | sed 's/[[:space:]]*$//' | paste -sd ';' -)"
     [ "$actual" = "$expected" ] && pass || fail_case "calls were [$actual], expected [$expected]"
 }
+assert_exit_code() { [ "$CCSYNC_EXIT_CODE" = "$1" ] && pass || fail_case "exit code $CCSYNC_EXIT_CODE, expected $1"; }
 assert_output_has() { grep -qF -- "$1" "$ROOT/output.txt" && pass || fail_case "output lacks: $1"; }
 trash_dir() { find "$HOME_DIR/.claude-sync/trash" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1; }
 
@@ -84,28 +85,34 @@ run_ccsync() {
         fakeBin="$HARNESS_DIR/fake-bash"
         HOME="$HOME_DIR" USERPROFILE="$HOME_DIR" TMPDIR="$TMP_DIR" FAKE_DIR="$FAKE_DIR" PATH="$fakeBin:$PATH" \
             bash "$REPO/ccsync/ccsync" "$@" < /dev/null > "$ROOT/output.txt" 2>&1
+        CCSYNC_EXIT_CODE=$?
     else
         fakeBin="$HARNESS_DIR/fake-cmd"
         HOME="$HOME_DIR" USERPROFILE="$HOME_DIR" FAKE_DIR="$(cygpath -w "$FAKE_DIR")" PATH="$fakeBin:$PATH" \
             powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$REPO/ccsync/ccsync.ps1")" "$@" \
             < /dev/null > "$ROOT/output.txt" 2>&1
+        CCSYNC_EXIT_CODE=$?
     fi
 }
 
-# Refuses to run anything unless the fake is the claude-sync each copy resolves.
+# Refuses to run anything unless the fakes are the claude-sync and antigravity-sync each copy resolves.
 check_fake_resolves() {
-    local resolved
-    resolved="$(PATH="$HARNESS_DIR/fake-bash:$PATH" command -v claude-sync)"
-    [ "$resolved" = "$HARNESS_DIR/fake-bash/claude-sync" ] || { echo "bash resolves $resolved, not the fake"; exit 2; }
+    local resolved program
+    for program in claude-sync antigravity-sync; do
+        resolved="$(PATH="$HARNESS_DIR/fake-bash:$PATH" command -v "$program")"
+        [ "$resolved" = "$HARNESS_DIR/fake-bash/$program" ] || { echo "bash resolves $resolved, not the fake $program"; exit 2; }
+    done
     case " $IMPLEMENTATIONS " in
         *' powershell '*) ;;
         *) return 0 ;;
     esac
-    resolved="$(PATH="$HARNESS_DIR/fake-cmd:$PATH" powershell.exe -NoProfile -Command '(Get-Command claude-sync).Source' | tr -d '\r')"
-    case "$resolved" in
-        *fake-cmd\\claude-sync.cmd) ;;
-        *) echo "PowerShell resolves $resolved, not the fake"; exit 2 ;;
-    esac
+    for program in claude-sync antigravity-sync; do
+        resolved="$(PATH="$HARNESS_DIR/fake-cmd:$PATH" powershell.exe -NoProfile -Command "(Get-Command $program).Source" | tr -d '\r')"
+        case "$resolved" in
+            *fake-cmd\\$program.cmd) ;;
+            *) echo "PowerShell resolves $resolved, not the fake $program"; exit 2 ;;
+        esac
+    done
 }
 
 check_fake_resolves
@@ -133,7 +140,8 @@ for IMPL in $IMPLEMENTATIONS; do
     assert_output_has 'no hash recorded in state.json'
     assert_output_has 'left 1 conflict copy'
     assert_output_has 'kept 1 file(s) the other machine deleted'
-    assert_calls 'pull;diff;rebuild-history'
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull'
+    assert_exit_code 0
 
     SCENARIO=prune
     new_fixture 100 'projects/p1/s2/only.jsonl|only file|match'
@@ -160,7 +168,7 @@ for IMPL in $IMPLEMENTATIONS; do
     assert_exists "$HOME_DIR/.claude/projects/p1/s1/deleted.jsonl"
     assert_output_has 'would move 1 file(s)'
     assert_output_has 'a dry run cannot see cloud keys'
-    assert_calls 'pull --dry-run=true;diff'
+    assert_calls 'pull --dry-run=true;diff;antigravity-sync pull --dry-run'
 
     SCENARIO=dry-run-count-trigger
     specs=(); for n in $(seq 1 21); do specs+=("projects/p1/s1/f$n.jsonl|file $n|match"); done
@@ -172,14 +180,14 @@ for IMPL in $IMPLEMENTATIONS; do
     new_fixture 100 'projects/p1/s1/deleted.jsonl|gone elsewhere|match'
     run_ccsync pull --dry-run=false
     assert_missing "$HOME_DIR/.claude/projects/p1/s1/deleted.jsonl"
-    assert_calls 'pull --dry-run=false;diff;rebuild-history'
+    assert_calls 'pull --dry-run=false;diff;rebuild-history;antigravity-sync pull'
 
     SCENARIO=quiet
     new_fixture 100 'projects/p1/s1/deleted.jsonl|gone elsewhere|match'
     run_ccsync sync -q
     assert_exists "$HOME_DIR/.claude/projects/p1/s1/deleted.jsonl"
     assert_output_has 'deletions not applied: -q/--quiet'
-    assert_calls 'pull -q;rebuild-history;push'
+    assert_calls 'pull -q;rebuild-history;antigravity-sync pull;push;antigravity-sync push'
 
     SCENARIO=unknown-token
     new_fixture 100 'projects/p1/s1/deleted.jsonl|gone elsewhere|match'
@@ -197,7 +205,32 @@ for IMPL in $IMPLEMENTATIONS; do
     SCENARIO=rebuild-history-flag
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
     run_ccsync pull --rebuild-history=true
-    assert_calls 'pull;diff;rebuild-history'
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull'
+
+    SCENARIO=push
+    new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
+    run_ccsync push --include-mcp
+    assert_calls 'push --include-mcp;antigravity-sync push'
+    assert_exit_code 0
+
+    SCENARIO=stop-antigravity
+    new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
+    run_ccsync pull --stop-antigravity
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull --stop-antigravity'
+
+    SCENARIO=antigravity-failure
+    new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
+    printf '3' > "$FAKE_DIR/antigravity-exit-code"
+    run_ccsync sync
+    assert_calls 'pull;diff;rebuild-history;antigravity-sync pull;push;antigravity-sync push'
+    assert_output_has 'antigravity-sync pull failed (exit 3)'
+    assert_exit_code 3
+
+    SCENARIO=version
+    new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'
+    run_ccsync version
+    assert_calls '--version;antigravity-sync version'
+    assert_output_has 'ccsync v1.17.2-patch2'
 
     SCENARIO=passthrough
     new_fixture 100 'projects/p1/s1/kept.jsonl|edited here|other'

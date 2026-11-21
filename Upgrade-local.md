@@ -25,6 +25,12 @@ They cover:
   `USERPROFILE` as well as `HOME`, so they never touch the real `~/.claude`.
 - **Junctions skipped when listing files** (`internal/sync/state.go`).
 - **The ccsync wrapper** (`ccsync/`): bash and PowerShell copies, their tests, `.gitattributes`, `.npmignore`.
+  It runs claude-sync, then antigravity-sync.
+- **antigravity-sync** (`antigravity-sync/`): syncs Antigravity conversations through the same bucket, converting
+  paths between Windows and macOS. It is its own Go module that imports claude-sync's `internal/config`,
+  `internal/crypto` and `internal/storage` packages and changes no claude-sync file, so a rebase never conflicts
+  with it; at worst it stops compiling when upstream changes one of those packages. See
+  `antigravity-sync/README.md`.
 
 When upstream adopts one of these, the rebase drops this fork's copy by itself. Then remove its line here.
 
@@ -59,9 +65,11 @@ Run these in the repository on one machine.
    `internal/sync/paths.go` and `internal/sync/state.go`, where upstream's path mapping and this fork's
    drive-letter and junction changes meet. Keep upstream's change and re-apply the fork's on top of it.
 4. **Test.** See "Testing on Windows" below. Compare against a clean run of the release tag: the same tests may
-   fail on both, none may fail only on `main`.
+   fail on both, none may fail only on `main`. The root `go test ./...` does not include antigravity-sync, which
+   is a separate module; if it no longer compiles, adapt its calls to the changed claude-sync package.
    ```bash
    go test ./...
+   (cd antigravity-sync && go test ./...)
    bash ccsync/tests/run-scenarios.sh
    ```
 5. **Check ccsync against the new claude-sync.** ccsync reads claude-sync's text output, and the scenario tests use
@@ -80,13 +88,21 @@ Run these in the repository on one machine.
    V=$(git describe --tags --always --dirty)
    GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=$V" -o bin/claude-sync-windows-amd64.exe ./cmd/claude-sync
    GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.version=$V" -o bin/claude-sync-darwin-arm64 ./cmd/claude-sync
+   cd antigravity-sync
+   GOOS=windows GOARCH=amd64 go build -ldflags "-s -w -X main.version=$V" -o bin/antigravity-sync-windows-amd64.exe .
+   GOOS=darwin GOARCH=arm64 go build -ldflags "-s -w -X main.version=$V" -o bin/antigravity-sync-darwin-arm64 .
+   cd ..
    ```
 7. **Install.** Keep each replaced file beside the new one with its version as a suffix, so going back is a rename.
    - Builds folder (this PC): `H:\Github\Dev\misc\claude-sync-builds`, holding `claude-sync-windows-amd64.exe`,
-     `claude-sync-darwin-arm64` and `ccsync-darwin` (a copy of `ccsync/ccsync`).
-   - Windows: `C:\Users\Goten\go\bin\claude-sync.exe` and `C:\Users\Goten\.local\bin\ccsync.ps1` (plus `ccsync.cmd`).
-   - Mac: copy `claude-sync-darwin-arm64` and `ccsync-darwin` over the files `command -v claude-sync` and
-     `command -v ccsync` show, then `chmod +x` both (Windows does not keep the execute bit).
+     `claude-sync-darwin-arm64`, `antigravity-sync-windows-amd64.exe`, `antigravity-sync-darwin-arm64` and
+     `ccsync-darwin` (a copy of `ccsync/ccsync`).
+   - Windows: `C:\Users\Goten\go\bin\claude-sync.exe`, `C:\Users\Goten\go\bin\antigravity-sync.exe` and
+     `C:\Users\Goten\.local\bin\ccsync.ps1` (plus `ccsync.cmd`).
+   - Mac: copy `claude-sync-darwin-arm64`, `antigravity-sync-darwin-arm64` and `ccsync-darwin` over the files
+     `command -v claude-sync`, `command -v antigravity-sync` and `command -v ccsync` show (the first install of
+     antigravity-sync goes beside claude-sync, named `antigravity-sync`), then `chmod +x` all three (Windows does
+     not keep the execute bit).
    - Then run `ccsync pull --dry-run` once on each machine: it changes nothing, and it warns if it cannot parse
      claude-sync's output.
 8. **Push.** The rebase rewrote `main`, so the push has to replace it; `--force-with-lease` refuses if GitHub holds
@@ -127,7 +143,7 @@ git fetch upstream --tags
   (cd internal/storage/webdav && ../../../bin/tests/webdav.test.exe)
   (cd cmd/claude-sync && ../../bin/tests/claude-sync-cmd.test.exe)
   ```
-  Run every other package with `go test`.
+  Run every other package with `go test`. antigravity-sync's tests open no sockets.
 - Four tests expect Unix file modes and fail on Windows, upstream's tree included:
   `TestCreateBackupSetsRestrictivePermissions`, `TestSaveFilePermissions`, `TestCrossDeviceSessionSync` and
   `TestPullSetsRestrictivePermissions`.
