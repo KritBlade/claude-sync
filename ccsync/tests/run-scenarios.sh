@@ -38,7 +38,13 @@ assert_calls() {
 }
 assert_exit_code() { [ "$CCSYNC_EXIT_CODE" = "$1" ] && pass || fail_case "exit code $CCSYNC_EXIT_CODE, expected $1"; }
 assert_output_has() { grep -qF -- "$1" "$ROOT/output.txt" && pass || fail_case "output lacks: $1"; }
-trash_dir() { find "$HOME_DIR/.claude-sync/trash" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -1; }
+# Globs and ls, not find: bash started from PowerShell keeps the Windows PATH order, where find is find.exe.
+trash_dir() {
+    local candidate
+    for candidate in "$HOME_DIR/.claude-sync/trash"/*/; do
+        [ -d "$candidate" ] && { printf '%s\n' "${candidate%/}"; return; }
+    done
+}
 
 sha() { printf '%s' "$1" | python3 -c 'import sys, hashlib; print(hashlib.sha256(sys.stdin.buffer.read()).hexdigest())'; }
 
@@ -237,7 +243,7 @@ for IMPL in $IMPLEMENTATIONS; do
     run_ccsync status --verbose
     assert_calls 'status --verbose'
     if [ "$IMPL" = bash ]; then
-        leftover="$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 | head -1)"
+        leftover="$(ls -A "$TMP_DIR" | head -1)"
         [ -z "$leftover" ] && pass || fail_case "passthrough left a temp folder: $leftover"
     fi
 done
